@@ -1,0 +1,898 @@
+import { describe, expect, test } from "bun:test";
+import {
+  bytesToHex,
+  hexToBytes,
+  NODE_COMPACT_FILTERS,
+} from "bip157";
+import { filterHash, filterHeader } from "bip158";
+import {
+  decodeCompactTarget,
+  encodeBlockHeader,
+  headerHashInternal,
+  hashToUint256,
+  storedHeaderFromBlockHeader,
+  type BlockHeader,
+  type HeaderRecord,
+} from "bitcoin-headers";
+import { createMessageBus } from "../../src/bus/message-bus.ts";
+import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
+import type { FilterSessionApi } from "../../src/net/filter-sync.ts";
+import {
+  createFiltersDownloadModule,
+  type FiltersDownloadOptions,
+} from "../../src/modules/filters-download.ts";
+import {
+  markWalletBirthdayPending,
+  maybeFreezeWalletBirthday,
+} from "../../src/wallet/birthday.ts";
+import { stubPlatformNet } from "./stub-platform-net.ts";
+
+const EASY_BITS = 0x207fffff;
+const EASY_LIMIT = decodeCompactTarget(EASY_BITS, (1n << 256n) - 1n);
+
+function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      if (pred()) return resolve();
+      if (Date.now() - start > timeoutMs) {
+        return reject(new Error("timeout waiting for condition"));
+      }
+      setTimeout(tick, 10);
+    };
+    tick();
+  });
+}
+
+function mineHeader(options: {
+  previousHash?: Uint8Array;
+  bits: number;
+  timestamp: number;
+  marker: number;
+}): BlockHeader {
+  const target = decodeCompactTarget(options.bits, EASY_LIMIT);
+  const header: BlockHeader = {
+    version: options.marker,
+    previousBlockHash: options.previousHash?.slice() ?? new Uint8Array(32),
+    merkleRoot: new Uint8Array(32).fill(options.marker & 0xff),
+    timestamp: options.timestamp,
+    bits: options.bits,
+    nonce: 0,
+  };
+  for (let nonce = 0; nonce <= 0xffffffff; nonce++) {
+    header.nonce = nonce;
+    if (hashToUint256(headerHashInternal(header)) <= target) return header;
+  }
+  throw new Error("unable to mine deterministic test header");
+}
+
+function record(height: number, header: BlockHeader): HeaderRecord {
+  return storedHeaderFromBlockHeader(height, header);
+}
+
+function dbHeaderWrites(records: HeaderRecord[]) {
+  return records.map((r) => ({
+    height: r.height,
+    hashInternalHex: r.hashInternalHex,
+    header: hexToBytes(r.headerHex),
+  }));
+}
+
+type FilterFixture = {
+  from: number;
+  to: number;
+  headers: HeaderRecord[];
+  bootstrapPrev: Uint8Array;
+  filterBytesByHeight: Map<number, Uint8Array>;
+  filterHashesByHeight: Map<number, Uint8Array>;
+  filterHeaderByHeight: Map<number, Uint8Array>;
+  checkpointAt1000: Uint8Array;
+};
+
+/** Heights 998–1000 with checkpoint at 1000 for cfheaders auth. */
+function buildFilterFixture(): FilterFixture {
+  const h998 = mineHeader({
+    bits: EASY_BITS,
+    timestamp: 1_998,
+    marker: 98,
+  });
+  const h999 = mineHeader({
+    previousHash: headerHashInternal(h998),
+    bits: EASY_BITS,
+    timestamp: 1_999,
+    marker: 99,
+  });
+  const h1000 = mineHeader({
+    previousHash: headerHashInternal(h999),
+    bits: EASY_BITS,
+    timestamp: 2_000,
+    marker: 100,
+  });
+
+  const headers = [
+    record(998, h998),
+    record(999, h999),
+    record(1000, h1000),
+  ];
+
+  const bootstrapPrev = new Uint8Array(32).fill(0x11);
+  const filterBytesByHeight = new Map<number, Uint8Array>();
+  const filterHashesByHeight = new Map<number, Uint8Array>();
+  const filterHeaderByHeight = new Map<number, Uint8Array>();
+
+  let prev = bootstrapPrev;
+  for (const height of [998, 999, 1000]) {
+    const fb = new Uint8Array([height & 0xff, 0xab, 0xcd]);
+    const fh = new Uint8Array(filterHash(fb));
+    const header = new Uint8Array(filterHeader(fh, prev));
+    filterBytesByHeight.set(height, fb);
+    filterHashesByHeight.set(height, fh);
+    filterHeaderByHeight.set(height, header);
+    prev = header;
+  }
+
+  return {
+    from: 998,
+    to: 1000,
+    headers,
+    bootstrapPrev,
+    filterBytesByHeight,
+    filterHashesByHeight,
+    filterHeaderByHeight,
+    checkpointAt1000: filterHeaderByHeight.get(1000)!,
+  };
+}
+
+function seedPeer(db: ReturnType<typeof createSqliteDatabase>): void {
+  db.peers.upsert({
+    host: "1.1.1.1",
+    port: 8333,
+    services: BigInt(NODE_COMPACT_FILTERS),
+    alive: true,
+    usedForBlocks: false,
+    lastProbedAt: null,
+  });
+}
+
+function createScriptedSession(
+  fixture: FilterFixture,
+  options?: {
+    badHeight?: number;
+    onOpen?: () => void;
+    holdCfilt?: Promise<void>;
+  },
+): FilterSessionApi {
+  options?.onOpen?.();
+  const {
+    headers,
+    bootstrapPrev,
+    filterBytesByHeight,
+    filterHashesByHeight,
+    filterHeaderByHeight,
+    checkpointAt1000,
+  } = fixture;
+
+  return {
+    services: BigInt(NODE_COMPACT_FILTERS),
+    async getCFCheckpt() {
+      const tip = headers[headers.length - 1]!;
+      const count = Math.floor(tip.height / 1000);
+      const out: Uint8Array[] = [];
+      for (let i = 0; i < count; i++) {
+        out.push(i === count - 1 ? checkpointAt1000.slice() : new Uint8Array(32));
+      }
+      return out;
+    },
+    async getCFHeaders(startHeight, stopHash) {
+      const stopHeight = headers.find(
+        (h) => h.hashInternalHex === bytesToHex(stopHash),
+      )!.height;
+      const filterHashes: Uint8Array[] = [];
+      for (let h = startHeight; h <= stopHeight; h++) {
+        filterHashes.push(filterHashesByHeight.get(h)!.slice());
+      }
+      const previousFilterHeader =
+        startHeight === fixture.from
+          ? bootstrapPrev.slice()
+          : filterHeaderByHeight.get(startHeight - 1)!.slice();
+      return {
+        filterType: 0,
+        stopHash: stopHash.slice(),
+        previousFilterHeader,
+        filterHashes,
+      };
+    },
+    async getCFilters(startHeight, stopHash, expectCount, onFilter) {
+      if (options?.holdCfilt) await options.holdCfilt;
+      const stopHeight = headers.find(
+        (h) => h.hashInternalHex === bytesToHex(stopHash),
+      )!.height;
+      const out: Array<{ blockHash: Uint8Array; filterBytes: Uint8Array }> = [];
+      for (let h = startHeight; h <= stopHeight; h++) {
+        const row = headers.find((r) => r.height === h)!;
+        let fb = filterBytesByHeight.get(h)!;
+        if (options?.badHeight === h) {
+          fb = new Uint8Array([0xff]);
+        }
+        const item = {
+          blockHash: hexToBytes(row.hashInternalHex),
+          filterBytes: fb,
+        };
+        out.push(item);
+        if (onFilter) await onFilter(item);
+      }
+      expect(out.length).toBe(expectCount);
+      return out;
+    },
+    close() {},
+  };
+}
+
+function makeOpenSession(
+  fixture: FilterFixture,
+  options?: {
+    badHeight?: number;
+    onOpen?: () => void;
+  },
+): FiltersDownloadOptions["openSession"] {
+  return async () => {
+    return {
+      ok: true,
+      value: createScriptedSession(fixture, options),
+    };
+  };
+}
+
+describe("filters-download", () => {
+  test("busy kick does not double-start; dirty bit re-runs after", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    let releaseCfilt!: () => void;
+    const cfiltHeld = new Promise<void>((resolve) => {
+      releaseCfilt = resolve;
+    });
+
+    let sessionOpened = false;
+    const downloadRuns = { count: 0 };
+
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        idleDelayMs: 50,
+        onDownloadRun: () => {
+          downloadRuns.count++;
+        },
+        openSession: async () => ({
+          ok: true,
+          value: createScriptedSession(fixture, {
+            onOpen: () => {
+              sessionOpened = true;
+            },
+            holdCfilt: cfiltHeld,
+          }),
+        }),
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => sessionOpened);
+    bus.emit("headers:progress", {
+      at: Date.now(),
+      downloaded: 1,
+      total: 1,
+      height: 1,
+    });
+    bus.emit("headers:progress", {
+      at: Date.now(),
+      downloaded: 2,
+      total: 2,
+      height: 2,
+    });
+    expect(downloadRuns.count).toBe(1);
+    releaseCfilt();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    await waitFor(() => downloadRuns.count >= 2);
+    await mod.stop();
+    db.close();
+  });
+
+  test("idle kick resumes when tip grows", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers.slice(0, 2)));
+    seedPeer(db);
+
+    const downloadRuns = { count: 0 };
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        idleDelayMs: 50,
+        onDownloadRun: () => {
+          downloadRuns.count++;
+        },
+        openSession: makeOpenSession(fixture),
+      },
+    );
+
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(db.filters.countInRange(fixture.from, fixture.to)).toBe(0);
+
+    db.headers.append(dbHeaderWrites(fixture.headers.slice(2)));
+    bus.emit("headers:progress", {
+      at: Date.now(),
+      downloaded: 3,
+      total: 3,
+      height: 3,
+    });
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    expect(downloadRuns.count).toBeGreaterThanOrEqual(1);
+    await mod.stop();
+    db.close();
+  });
+
+  test("emits filters:progress with downloaded and total", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const progress: Array<{ downloaded: number; total: number }> = [];
+    bus.on("filters:progress", (p) => {
+      progress.push({ downloaded: p.downloaded, total: p.total });
+    });
+
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        openSession: makeOpenSession(fixture),
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    expect(progress.some((p) => p.downloaded === 3 && p.total === 3)).toBe(true);
+    await mod.stop();
+    db.close();
+  });
+
+  test("rejects bad filter bytes and tries another peer", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: BigInt(NODE_COMPACT_FILTERS),
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+    db.peers.upsert({
+      host: "2.2.2.2",
+      port: 8333,
+      services: BigInt(NODE_COMPACT_FILTERS),
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    const openedHosts: string[] = [];
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        coolMs: 60_000,
+        openSession: async (host) => {
+          openedHosts.push(host);
+          return {
+            ok: true,
+            value: createScriptedSession(fixture, {
+              badHeight: host === "1.1.1.1" ? 999 : undefined,
+            }),
+          };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    expect(openedHosts).toContain("1.1.1.1");
+    expect(openedHosts).toContain("2.2.2.2");
+    await mod.stop();
+    db.close();
+  });
+
+  test("persists bootstrap prev at from-1 when from > 0", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        openSession: makeOpenSession(fixture),
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.has(fixture.to));
+    expect(db.filterHeaders.get(fixture.from - 1)?.header).toEqual(
+      fixture.bootstrapPrev,
+    );
+    await mod.stop();
+    db.close();
+  });
+
+  test("rejects bootstrap first batch without in-range checkpoint", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 1,
+        headerBatchSize: 1,
+        idleDelayMs: 20,
+        openSession: async () => ({
+          ok: true,
+          value: {
+            ...createScriptedSession(fixture),
+            async getCFHeaders(startHeight, stopHash) {
+              const base = await createScriptedSession(fixture).getCFHeaders(
+                startHeight,
+                stopHash,
+              );
+              return {
+                ...base,
+                previousFilterHeader: new Uint8Array(32).fill(0xee),
+              };
+            },
+          },
+        }),
+      },
+    );
+
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(db.filterHeaders.get(fixture.from)).toBeNull();
+    expect(db.filters.count()).toBe(0);
+    await mod.stop();
+    db.close();
+  });
+
+  test("retries after cfilter EOF once cool elapses", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    let calls = 0;
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        idleDelayMs: 20,
+        coolMs: 1,
+        openSession: async () => {
+          calls++;
+          if (calls === 1) {
+            return {
+              ok: true,
+              value: {
+                ...createScriptedSession(fixture),
+                async getCFilters() {
+                  throw new Error("unexpected EOF");
+                },
+              },
+            };
+          }
+          return { ok: true, value: createScriptedSession(fixture) };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    await mod.stop();
+    db.close();
+  });
+
+  test("requests first bootstrap batch through next checkpoint", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const requestedStops: number[] = [];
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 3,
+        headerBatchSize: 3,
+        openSession: async () => ({
+          ok: true,
+          value: {
+            ...createScriptedSession(fixture),
+            async getCFHeaders(startHeight, stopHash) {
+              const stopHeight = fixture.headers.find(
+                (h) => h.hashInternalHex === bytesToHex(stopHash),
+              )!.height;
+              requestedStops.push(stopHeight);
+              return createScriptedSession(fixture).getCFHeaders(
+                startHeight,
+                stopHash,
+              );
+            },
+          },
+        }),
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.has(fixture.to));
+    expect(requestedStops[0]).toBe(1000);
+    await mod.stop();
+    db.close();
+  });
+
+  test("two-phase: cfheaders complete before cfilters", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const order: string[] = [];
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        openSession: async () => ({
+          ok: true,
+          value: {
+            ...createScriptedSession(fixture),
+            async getCFHeaders(startHeight, stopHash) {
+              order.push("cfheaders");
+              return createScriptedSession(fixture).getCFHeaders(
+                startHeight,
+                stopHash,
+              );
+            },
+            async getCFilters(startHeight, stopHash, expectCount) {
+              order.push("cfilters");
+              return createScriptedSession(fixture).getCFilters(
+                startHeight,
+                stopHash,
+                expectCount,
+              );
+            },
+          },
+        }),
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    expect(order.indexOf("cfheaders")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("cfilters")).toBeGreaterThan(
+      order.indexOf("cfheaders"),
+    );
+    await mod.stop();
+    db.close();
+  });
+
+  test("internal filter holes do not report downloaded > total", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+    db.filterHeaders.append([
+      { height: fixture.from - 1, header: fixture.bootstrapPrev.slice() },
+      ...[...fixture.filterHeaderByHeight.entries()].map(([height, header]) => ({
+        height,
+        header: header.slice(),
+      })),
+    ]);
+    // Bodies at 998 and 1000 only — hole at 999.
+    db.filters.append([
+      {
+        height: fixture.from,
+        blockHashInternalHex: fixture.headers[0]!.hashInternalHex,
+        filter: fixture.filterBytesByHeight.get(fixture.from)!.slice(),
+      },
+      {
+        height: fixture.to,
+        blockHashInternalHex: fixture.headers[2]!.hashInternalHex,
+        filter: fixture.filterBytesByHeight.get(fixture.to)!.slice(),
+      },
+    ]);
+
+    const progress: Array<{ downloaded: number; total: number }> = [];
+    bus.on("filters:progress", (p) => {
+      progress.push({ downloaded: p.downloaded, total: p.total });
+    });
+
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        openSession: async () => ({
+          ok: true,
+          value: {
+            ...createScriptedSession(fixture),
+            async getCFHeaders() {
+              throw new Error("headers already present");
+            },
+          },
+        }),
+      },
+    );
+
+    await mod.start();
+    await waitFor(
+      () => db.filters.countInRange(fixture.from, fixture.to) === 3,
+    );
+    await mod.stop();
+
+    for (const p of progress) {
+      expect(p.downloaded).toBeLessThanOrEqual(p.total);
+    }
+    // Correct while gapped (span math would falsely seed 3/3).
+    expect(progress.some((p) => p.downloaded === 2 && p.total === 3)).toBe(true);
+    expect(progress.at(-1)).toEqual({ downloaded: 3, total: 3 });
+    db.close();
+  });
+
+  test("backfills filters when filter headers already exist", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    db.filterHeaders.append([
+      { height: fixture.from - 1, header: fixture.bootstrapPrev.slice() },
+      ...[...fixture.filterHeaderByHeight.entries()].map(([height, header]) => ({
+        height,
+        header: header.slice(),
+      })),
+    ]);
+
+    let cfHeadersCalls = 0;
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        openSession: async () => ({
+          ok: true,
+          value: {
+            ...createScriptedSession(fixture),
+            async getCFHeaders() {
+              cfHeadersCalls++;
+              throw new Error("headers already present");
+            },
+          },
+        }),
+      },
+    );
+
+    await mod.start();
+    await waitFor(
+      () => db.filters.countInRange(fixture.from, fixture.to) === 3,
+    );
+    expect(cfHeadersCalls).toBe(0);
+    await mod.stop();
+    db.close();
+  });
+
+  test("falls back to stored compact-filter peers when none are alive", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    db.peers.upsert({
+      host: "9.9.9.9",
+      port: 8333,
+      services: BigInt(NODE_COMPACT_FILTERS),
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    const openedHosts: string[] = [];
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        openSession: async (host) => {
+          openedHosts.push(host);
+          return { ok: true, value: createScriptedSession(fixture) };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    expect(openedHosts[0]).toBe("9.9.9.9");
+    expect(db.peers.listAlive().some((p) => p.host === "9.9.9.9")).toBe(true);
+    await mod.stop();
+    db.close();
+  });
+
+  test("retries session-dead peers and marks them alive on success", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    db.peers.upsert({
+      host: "8.8.8.8",
+      port: 8333,
+      services: BigInt(NODE_COMPACT_FILTERS),
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    let opens = 0;
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        idleDelayMs: 20,
+        coolMs: 1,
+        openSession: async () => {
+          opens++;
+          if (opens === 1) {
+            return { ok: false, error: "boom" };
+          }
+          return { ok: true, value: createScriptedSession(fixture) };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    expect(opens).toBeGreaterThanOrEqual(2);
+    expect(db.peers.listAlive().some((p) => p.host === "8.8.8.8")).toBe(true);
+    await mod.stop();
+    db.close();
+  });
+
+  test("pending wallet birthday downloads no filters", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+    markWalletBirthdayPending(db);
+
+    let sessionOpened = false;
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        idleDelayMs: 30,
+        openSession: async () => {
+          sessionOpened = true;
+          return { ok: true, value: createScriptedSession(fixture) };
+        },
+      },
+    );
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 120));
+    expect(sessionOpened).toBe(false);
+    expect(db.filters.count()).toBe(0);
+    await mod.stop();
+    db.close();
+  });
+
+  test("frozen birthday skips cfilters below that height", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+    markWalletBirthdayPending(db);
+    expect(maybeFreezeWalletBirthday(db, 1000)).toBe(true);
+
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        idleDelayMs: 50,
+        openSession: makeOpenSession(fixture),
+      },
+    );
+    await mod.start();
+    await waitFor(() => db.filters.has(1000));
+    expect(db.filters.has(998)).toBe(false);
+    expect(db.filters.has(999)).toBe(false);
+    expect(db.filters.has(1000)).toBe(true);
+    await mod.stop();
+    db.close();
+  });
+
+  test("while sync:idle, peers:updated does not start a new download run", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const downloadRuns = { count: 0 };
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        idleDelayMs: 50,
+        onDownloadRun: () => {
+          downloadRuns.count++;
+        },
+        openSession: makeOpenSession(fixture),
+      },
+    );
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    const runsAfterSync = downloadRuns.count;
+    bus.emit("sync:idle", { at: Date.now() });
+    await new Promise((r) => setTimeout(r, 20));
+    bus.emit("peers:updated", { at: Date.now() });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(downloadRuns.count).toBe(runsAfterSync);
+    await mod.stop();
+    db.close();
+  });
+});

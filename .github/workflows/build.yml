@@ -1,0 +1,94 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            artifact: blueberry-linux-x64
+            binary: blueberry-linux-x64
+          - runner: windows-latest
+            artifact: blueberry-windows-x64
+            binary: blueberry-windows-x64.exe
+          - runner: macos-15
+            artifact: blueberry-macos-arm64
+            binary: blueberry-macos-arm64
+          - runner: macos-15-intel
+            artifact: blueberry-macos-x64
+            binary: blueberry-macos-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Name binary
+        shell: bash
+        run: |
+          if [ -f dist/blueberry.exe ]; then
+            mv dist/blueberry.exe "dist/${{ matrix.binary }}"
+          elif [ -f dist/blueberry ]; then
+            mv dist/blueberry "dist/${{ matrix.binary }}"
+          else
+            echo "Compiled binary not found under dist/" >&2
+            ls -la dist/ || true
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.binary }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: blueberry-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/blueberry-linux-x64
+            artifacts/blueberry-windows-x64.exe
+            artifacts/blueberry-macos-arm64
+            artifacts/blueberry-macos-x64

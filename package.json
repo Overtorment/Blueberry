@@ -1,0 +1,38 @@
+{
+  "name": "blueberry",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "start": "bun src/main.tsx",
+    "build": "bun build --compile --outfile=dist/blueberry src/main.tsx",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "bun test tests/unit",
+    "test:integration": "bun test tests/integration"
+  },
+  "dependencies": {
+    "@hazae41/echalote": "github:Overtorment/echalote#e7ac116",
+    "@keystonehq/bc-ur-registry": "^0.8.0",
+    "@noble/curves": "1.9.1",
+    "@opentui/core": "^0.4.5",
+    "@opentui/react": "^0.4.5",
+    "@scure/bip32": "^1.7.0",
+    "@scure/bip39": "^1.6.0",
+    "@scure/btc-signer": "^1.8.1",
+    "bip157": "github:Overtorment/bip157#c5371f8",
+    "bip158": "github:Overtorment/bip158#bbc1b3f",
+    "bip324": "github:Overtorment/bip324#8abbc6d",
+    "bitcoin-headers": "github:Overtorment/bitcoin-headers#538946d",
+    "bitcoinjs-lib": "7.0.1",
+    "qr": "^0.6.0",
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@ngraveio/bc-ur": "^1.1.13",
+    "@types/bun": "^1.3.14",
+    "@types/react": "^19.2.0",
+    "typescript": "^5.9.3"
+  },
+  "trustedDependencies": [
+    "@hazae41/echalote"
+  ]
+}

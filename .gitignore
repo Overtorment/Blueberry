@@ -1,0 +1,12 @@
+.idea/
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+*.tsbuildinfo
+/data*
+.worktrees/
+.superpowers/
