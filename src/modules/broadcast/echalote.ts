@@ -1,10 +1,8 @@
 /**
  * Runtime load of echalote. The package ships TypeScript source (`src/index.ts`).
  * A static import pulls that tree into blueberry `tsc` (verbatimModuleSyntax / DOM
- * BufferSource mismatches). Load via `createRequire` and the `Echalote` namespace.
+ * BufferSource mismatches).
  */
-import { createRequire } from "node:module";
-
 export type ExitDialerOptions = {
   meekUrl?: string;
   extendTimeoutMs?: number;
@@ -33,7 +31,6 @@ type EchaloteModule = {
   Echalote: EchaloteNamespace;
 };
 
-const require = createRequire(import.meta.url);
 const { Echalote } = require("@hazae41/echalote") as EchaloteModule;
 
 export function createExitDialer(
