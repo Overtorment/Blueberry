@@ -5,6 +5,7 @@ import {
 } from "../match/scan.ts";
 import type { WatchGaps } from "../wallet/derive.ts";
 import type { Wallet } from "../wallet/wallet.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 const IDLE_POLL_MS = 1_000;
@@ -180,11 +181,15 @@ export function createFiltersMatchingModule(
         module: "filters-matching",
         status: "running",
       });
-      loopPromise = (async () => {
-        await yieldOnce();
-        if (stopped) return;
-        await loop();
-      })();
+      loopPromise = detachLoop(
+        ctx,
+        "filters-matching",
+        (async () => {
+          await yieldOnce();
+          if (stopped) return;
+          await loop();
+        })(),
+      );
     },
     async stop() {
       if (stopped) return;

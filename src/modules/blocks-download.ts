@@ -11,6 +11,7 @@ import {
   type BlockSessionApi,
 } from "../net/block-sync.ts";
 import type { PlatformNet } from "../net/types.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 /** Bitcoin NODE_NETWORK — peer can serve historical blocks. */
@@ -273,7 +274,7 @@ export function createBlocksDownloadModule(
         if (quiet) return;
         kick();
       });
-      loopPromise = loop();
+      loopPromise = detachLoop(ctx, "blocks-download", loop());
       ctx.bus.emit("module:status", {
         module: "blocks-download",
         status: "running",

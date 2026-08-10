@@ -17,6 +17,7 @@ import {
   type FilterSessionApi,
 } from "../net/filter-sync.ts";
 import type { PlatformNet } from "../net/types.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 export type FiltersDownloadOptions = {
@@ -607,7 +608,7 @@ export function createFiltersDownloadModule(
       busy = false;
       if (needsRun && !stopped) {
         needsRun = false;
-        void runDownload();
+        void detachLoop(ctx, "filters-download", runDownload());
       }
     }
   }
@@ -619,7 +620,7 @@ export function createFiltersDownloadModule(
       kick();
       return;
     }
-    void runDownload();
+    void detachLoop(ctx, "filters-download", runDownload());
   }
 
   return {

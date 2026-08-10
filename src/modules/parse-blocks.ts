@@ -9,6 +9,7 @@ import {
   loadWatchGaps,
   saveWatchGaps,
 } from "../wallet/watch-gaps.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 const DEFAULT_BATCH_SIZE = 32;
@@ -240,11 +241,15 @@ export function createParseBlocksModule(
         status: "running",
       });
 
-      loopPromise = (async () => {
-        await yieldOnce();
-        if (stopped) return;
-        await loop();
-      })();
+      loopPromise = detachLoop(
+        ctx,
+        "parse-blocks",
+        (async () => {
+          await yieldOnce();
+          if (stopped) return;
+          await loop();
+        })(),
+      );
     },
     async stop() {
       if (stopped) return;

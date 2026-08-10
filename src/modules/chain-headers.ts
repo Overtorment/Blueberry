@@ -30,6 +30,7 @@ import {
   type HeaderSessionPool,
 } from "../net/header-sync.ts";
 import type { PlatformNet } from "../net/types.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 export type ChainHeadersOptions = {
@@ -568,7 +569,7 @@ export function createChainHeadersModule(
         if (quiet) return;
         kick();
       });
-      void runLoop();
+      void detachLoop(ctx, "chain-headers", runLoop());
       ctx.bus.emit("module:status", {
         module: "chain-headers",
         status: "running",
