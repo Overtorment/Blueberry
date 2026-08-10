@@ -114,8 +114,14 @@ function persistBranch(
     header: hexToBytes(record.headerHex),
     cumulativeWork: branch.cumulativeWorkByHeight.get(record.height)!,
   }));
-  if (mode === "append") ctx.db.headers.append(writes);
-  else ctx.db.headers.replaceAfter(ancestorHeight, writes);
+  if (mode === "append") {
+    ctx.db.headers.append(writes);
+    return;
+  }
+  ctx.db.transaction(() => {
+    ctx.db.rewindAfter(ancestorHeight);
+    ctx.db.headers.replaceAfter(ancestorHeight, writes);
+  });
 }
 
 /** Extend/replace an in-memory validated chain after a successful branch apply. */

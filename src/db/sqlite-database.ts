@@ -140,6 +140,18 @@ export function createSqliteDatabase(path: string): Database {
     // ignore
   }
 
+  function inTx(fn: () => void): void {
+    if (raw.inTransaction) {
+      fn();
+      return;
+    }
+    raw.transaction(fn)();
+  }
+
+  // COUNT(*) on fat/large tables is expensive — cache and adjust on mutations.
+  let filterCountCache: number | null = null;
+  let unscannedCountCache: number | null = null;
+
   const peers: PeersRepository = {
     upsert(peer: PeerWrite) {
       const now = Date.now();
@@ -409,29 +421,19 @@ export function createSqliteDatabase(path: string): Database {
       const tip = this.tip();
       // One transaction: 2000 autocommit inserts block the event loop for seconds
       // (quit/keypress starve). A single COMMIT is milliseconds.
-      raw.exec("BEGIN");
-      try {
+      inTx(() => {
         insertWrites(headerRecords, tip?.cumulativeWork ?? 0n);
-        raw.exec("COMMIT");
-      } catch (e) {
-        raw.exec("ROLLBACK");
-        throw e;
-      }
+      });
     },
 
     replaceAfter(commonAncestorHeight, headerRecords) {
-      raw.exec("BEGIN");
-      try {
+      inTx(() => {
         raw
           .query("DELETE FROM headers WHERE height > ?")
           .run(commonAncestorHeight);
         const ancestor = this.get(commonAncestorHeight);
         insertWrites(headerRecords, ancestor?.cumulativeWork ?? 0n);
-        raw.exec("COMMIT");
-      } catch (e) {
-        raw.exec("ROLLBACK");
-        throw e;
-      }
+      });
     },
   };
 
@@ -474,16 +476,11 @@ export function createSqliteDatabase(path: string): Database {
 
     append(rows) {
       if (rows.length === 0) return;
-      raw.exec("BEGIN");
-      try {
+      inTx(() => {
         for (const row of rows) {
           insertFilterHeader.run(row.height, row.header);
         }
-        raw.exec("COMMIT");
-      } catch (e) {
-        raw.exec("ROLLBACK");
-        throw e;
-      }
+      });
     },
 
     deleteFrom(height) {
@@ -519,9 +516,6 @@ export function createSqliteDatabase(path: string): Database {
     `SELECT COUNT(*) AS n FROM filters_unscanned`,
   );
 
-  // COUNT(*) on fat/large tables is expensive — cache and adjust on mutations.
-  let filterCountCache: number | null = null;
-  let unscannedCountCache: number | null = null;
   function cachedFilterCount(): number {
     if (filterCountCache === null) {
       filterCountCache = asInt(
@@ -673,21 +667,20 @@ export function createSqliteDatabase(path: string): Database {
 
     append(rows) {
       if (rows.length === 0) return;
-      raw.exec("BEGIN");
       try {
-        for (const row of rows) {
-          insertFilter.run(
-            row.height,
-            row.blockHashInternalHex,
-            row.filter,
-          );
-          insertUnscanned.run(row.height);
-        }
-        raw.exec("COMMIT");
+        inTx(() => {
+          for (const row of rows) {
+            insertFilter.run(
+              row.height,
+              row.blockHashInternalHex,
+              row.filter,
+            );
+            insertUnscanned.run(row.height);
+          }
+        });
         if (filterCountCache !== null) filterCountCache += rows.length;
         bumpUnscannedCache(rows.length);
       } catch (e) {
-        raw.exec("ROLLBACK");
         filterCountCache = null;
         unscannedCountCache = null;
         throw e;
@@ -725,16 +718,15 @@ export function createSqliteDatabase(path: string): Database {
         bumpUnscannedCache(-Number(result.changes));
         return;
       }
-      raw.exec("BEGIN");
       try {
         let removed = 0;
-        for (const height of sorted) {
-          removed += Number(deleteUnscannedOne.run(height).changes);
-        }
-        raw.exec("COMMIT");
+        inTx(() => {
+          for (const height of sorted) {
+            removed += Number(deleteUnscannedOne.run(height).changes);
+          }
+        });
         bumpUnscannedCache(-removed);
       } catch (e) {
-        raw.exec("ROLLBACK");
         unscannedCountCache = null;
         throw e;
       }
@@ -742,16 +734,15 @@ export function createSqliteDatabase(path: string): Database {
 
     markUnscanned(heights) {
       if (heights.length === 0) return;
-      raw.exec("BEGIN");
       try {
         let added = 0;
-        for (const height of heights) {
-          added += Number(insertUnscanned.run(height).changes);
-        }
-        raw.exec("COMMIT");
+        inTx(() => {
+          for (const height of heights) {
+            added += Number(insertUnscanned.run(height).changes);
+          }
+        });
         bumpUnscannedCache(added);
       } catch (e) {
-        raw.exec("ROLLBACK");
         unscannedCountCache = null;
         throw e;
       }
@@ -768,15 +759,16 @@ export function createSqliteDatabase(path: string): Database {
     },
 
     deleteFrom(height) {
-      raw.exec("BEGIN");
       try {
-        raw.query("DELETE FROM filters_unscanned WHERE height >= ?").run(height);
-        raw.query("DELETE FROM filters WHERE height >= ?").run(height);
-        raw.exec("COMMIT");
+        inTx(() => {
+          raw
+            .query("DELETE FROM filters_unscanned WHERE height >= ?")
+            .run(height);
+          raw.query("DELETE FROM filters WHERE height >= ?").run(height);
+        });
         filterCountCache = null;
         unscannedCountCache = null;
       } catch (e) {
-        raw.exec("ROLLBACK");
         filterCountCache = null;
         unscannedCountCache = null;
         throw e;
@@ -1061,6 +1053,30 @@ export function createSqliteDatabase(path: string): Database {
     },
   };
 
+  function rewindAfter(ancestorHeight: number): void {
+    inTx(() => {
+      raw
+        .query("DELETE FROM filter_headers WHERE height > ?")
+        .run(ancestorHeight);
+      raw
+        .query("DELETE FROM filters_unscanned WHERE height > ?")
+        .run(ancestorHeight);
+      raw.query("DELETE FROM filters WHERE height > ?").run(ancestorHeight);
+      raw
+        .query("DELETE FROM matched_blocks WHERE height > ?")
+        .run(ancestorHeight);
+      raw.query("DELETE FROM blocks WHERE height > ?").run(ancestorHeight);
+      raw
+        .query("DELETE FROM parsed_blocks WHERE height > ?")
+        .run(ancestorHeight);
+      raw
+        .query("DELETE FROM transactions WHERE height > ?")
+        .run(ancestorHeight);
+      filterCountCache = null;
+      unscannedCountCache = null;
+    });
+  }
+
   return {
     peers,
     headers,
@@ -1072,6 +1088,10 @@ export function createSqliteDatabase(path: string): Database {
     transactions,
     keyValue,
     utxoNames,
+    transaction(fn) {
+      inTx(fn);
+    },
+    rewindAfter,
     close() {
       raw.close();
     },

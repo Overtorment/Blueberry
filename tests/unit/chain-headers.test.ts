@@ -317,6 +317,24 @@ describe("chain-headers", () => {
         header: hexToBytes(r.headerHex),
       })),
     );
+    const oldTip = canonical[canonical.length - 1]!;
+    db.matchedBlocks.insert({
+      height: oldTip.height,
+      blockHashInternalHex: oldTip.hashInternalHex,
+    });
+    db.blocks.insert({
+      height: oldTip.height,
+      blockHashInternalHex: oldTip.hashInternalHex,
+      block: new Uint8Array([1, 2, 3]),
+    });
+    db.transactions.upsert({
+      txid: "cd".repeat(32),
+      height: oldTip.height,
+      txIndex: 0,
+      blockHashInternalHex: oldTip.hashInternalHex,
+      tx: new Uint8Array([4]),
+      netDeltaSats: 1,
+    });
 
     const events: Array<{ downloaded: number; total: number }> = [];
     bus.on("headers:progress", (p) => {
@@ -358,6 +376,9 @@ describe("chain-headers", () => {
     );
     expect(db.headers.count()).toBe(5); // checkpoint + 4 on winning tip
     expect(events.at(-1)).toEqual({ downloaded: 4, total: 10 });
+    expect(db.matchedBlocks.count()).toBe(0);
+    expect(db.blocks.has(oldTip.height)).toBe(false);
+    expect(db.transactions.list()).toEqual([]);
     await mod.stop();
     db.close();
   });
