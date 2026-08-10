@@ -6,6 +6,7 @@ import {
   headerWork,
   MAINNET_POW_LIMIT,
 } from "bitcoin-headers";
+import { fromSqliteServices, toSqliteServices } from "./peer-services.ts";
 import { ensureSchema } from "./schema.ts";
 import type {
   BlocksRepository,
@@ -28,45 +29,54 @@ import type {
   UtxoNamesRepository,
 } from "./types.ts";
 
+/** Bun `safeIntegers` returns INTEGER columns as bigint. */
+function asInt(value: bigint | number): number {
+  return typeof value === "bigint" ? Number(value) : value;
+}
+
+function asIntOrNull(value: bigint | number | null): number | null {
+  return value === null ? null : asInt(value);
+}
+
 type PeerRow = {
   host: string;
-  port: number;
-  services: string;
-  alive: number;
-  used_for_blocks: number;
-  last_probed_at: number | null;
-  created_at: number;
-  updated_at: number;
+  port: bigint | number;
+  services: bigint | number | string;
+  alive: bigint | number;
+  used_for_blocks: bigint | number;
+  last_probed_at: bigint | number | null;
+  created_at: bigint | number;
+  updated_at: bigint | number;
 };
 
 type HeaderRow = {
-  height: number;
+  height: bigint | number;
   hash_internal_hex: string;
   header: Uint8Array;
   cumulative_work: string;
 };
 
 type FilterHeaderRow = {
-  height: number;
+  height: bigint | number;
   header: Uint8Array;
 };
 
 type FilterRow = {
-  height: number;
+  height: bigint | number;
   block_hash_internal_hex: string;
   filter: Uint8Array;
 };
 
 function rowToFilterHeader(row: FilterHeaderRow): FilterHeaderRecord {
   return {
-    height: row.height,
+    height: asInt(row.height),
     header: row.header,
   };
 }
 
 function rowToFilter(row: FilterRow): FilterRecord {
   return {
-    height: row.height,
+    height: asInt(row.height),
     blockHashInternalHex: row.block_hash_internal_hex,
     filter: row.filter,
   };
@@ -74,7 +84,7 @@ function rowToFilter(row: FilterRow): FilterRecord {
 
 function rowToHeader(row: HeaderRow): StoredHeader {
   return {
-    height: row.height,
+    height: asInt(row.height),
     hashInternalHex: row.hash_internal_hex,
     header: row.header,
     cumulativeWork: BigInt(row.cumulative_work),
@@ -84,13 +94,13 @@ function rowToHeader(row: HeaderRow): StoredHeader {
 function rowToPeer(row: PeerRow): Peer {
   return {
     host: row.host,
-    port: row.port,
-    services: BigInt(row.services),
-    alive: row.alive === 1,
-    usedForBlocks: row.used_for_blocks === 1,
-    lastProbedAt: row.last_probed_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    port: asInt(row.port),
+    services: fromSqliteServices(row.services),
+    alive: asInt(row.alive) === 1,
+    usedForBlocks: asInt(row.used_for_blocks) === 1,
+    lastProbedAt: asIntOrNull(row.last_probed_at),
+    createdAt: asInt(row.created_at),
+    updatedAt: asInt(row.updated_at),
   };
 }
 
@@ -106,7 +116,8 @@ function headerWorkFromBytes(header: Uint8Array): bigint {
 }
 
 export function createSqliteDatabase(path: string): Database {
-  const raw = new BunDatabase(path);
+  // Required so peer services (full signed i64) round-trip without Number truncation.
+  const raw = new BunDatabase(path, { safeIntegers: true });
   raw.exec("PRAGMA journal_mode = WAL;");
   // 18GB+ filter DBs thrash with the default 2MB page cache.
   raw.exec("PRAGMA cache_size = -262144;"); // 256 MiB
@@ -147,7 +158,7 @@ export function createSqliteDatabase(path: string): Database {
         .run(
           peer.host,
           peer.port,
-          peer.services.toString(),
+          toSqliteServices(peer.services),
           peer.alive ? 1 : 0,
           peer.usedForBlocks ? 1 : 0,
           peer.lastProbedAt,
@@ -165,9 +176,9 @@ export function createSqliteDatabase(path: string): Database {
 
     count() {
       const row = raw.query("SELECT COUNT(*) AS n FROM peers").get() as {
-        n: number;
+        n: bigint | number;
       };
-      return row.n;
+      return asInt(row.n);
     },
 
     listAlive() {
@@ -182,7 +193,7 @@ export function createSqliteDatabase(path: string): Database {
     listAliveWithServices(serviceBits, limit, options) {
       const n = Math.max(0, Math.floor(limit));
       if (n === 0) return [];
-      const mask = serviceBits.toString();
+      const mask = toSqliteServices(serviceBits);
       const unused = options?.unusedForBlocks === true;
       const rows = (
         unused
@@ -190,14 +201,14 @@ export function createSqliteDatabase(path: string): Database {
               `SELECT * FROM peers
                WHERE alive = 1
                  AND used_for_blocks = 0
-                 AND (CAST(services AS INTEGER) & CAST(? AS INTEGER)) != 0
+                 AND (services & ?) != 0
                ORDER BY host, port
                LIMIT ?`,
             )
           : raw.query(
               `SELECT * FROM peers
                WHERE alive = 1
-                 AND (CAST(services AS INTEGER) & CAST(? AS INTEGER)) != 0
+                 AND (services & ?) != 0
                ORDER BY host, port
                LIMIT ?`,
             )
@@ -208,11 +219,11 @@ export function createSqliteDatabase(path: string): Database {
     listWithServices(serviceBits, limit) {
       const n = Math.max(0, Math.floor(limit));
       if (n === 0) return [];
-      const mask = serviceBits.toString();
+      const mask = toSqliteServices(serviceBits);
       const rows = raw
         .query(
           `SELECT * FROM peers
-           WHERE (CAST(services AS INTEGER) & CAST(? AS INTEGER)) != 0
+           WHERE (services & ?) != 0
            ORDER BY alive DESC,
              CASE WHEN last_probed_at IS NULL THEN 0 ELSE 1 END,
              last_probed_at ASC,
@@ -338,16 +349,16 @@ export function createSqliteDatabase(path: string): Database {
 
     count() {
       const row = raw.query("SELECT COUNT(*) AS n FROM headers").get() as {
-        n: number;
+        n: bigint | number;
       };
-      return row.n;
+      return asInt(row.n);
     },
 
     minHeight() {
       const row = raw
         .query("SELECT MIN(height) AS h FROM headers")
-        .get() as { h: number | null };
-      return row.h ?? null;
+        .get() as { h: bigint | number | null };
+      return asIntOrNull(row.h);
     },
 
     get(height) {
@@ -362,8 +373,8 @@ export function createSqliteDatabase(path: string): Database {
         .query(
           "SELECT height FROM headers WHERE hash_internal_hex = ? LIMIT 1",
         )
-        .get(hashInternalHex) as { height: number } | null;
-      return row?.height ?? null;
+        .get(hashInternalHex) as { height: bigint | number } | null;
+      return row ? asInt(row.height) : null;
     },
 
     loadRange(fromHeight, toHeight) {
@@ -446,8 +457,8 @@ export function createSqliteDatabase(path: string): Database {
     minHeight() {
       const row = raw
         .query("SELECT MIN(height) AS h FROM filter_headers")
-        .get() as { h: number | null };
-      return row.h ?? null;
+        .get() as { h: bigint | number | null };
+      return asIntOrNull(row.h);
     },
 
     loadRange(fromHeight, toHeight) {
@@ -513,13 +524,17 @@ export function createSqliteDatabase(path: string): Database {
   let unscannedCountCache: number | null = null;
   function cachedFilterCount(): number {
     if (filterCountCache === null) {
-      filterCountCache = (countFiltersStmt.get() as { n: number }).n;
+      filterCountCache = asInt(
+        (countFiltersStmt.get() as { n: bigint | number }).n,
+      );
     }
     return filterCountCache;
   }
   function cachedUnscannedCount(): number {
     if (unscannedCountCache === null) {
-      unscannedCountCache = (countUnscannedStmt.get() as { n: number }).n;
+      unscannedCountCache = asInt(
+        (countUnscannedStmt.get() as { n: bigint | number }).n,
+      );
     }
     return unscannedCountCache;
   }
@@ -540,22 +555,22 @@ export function createSqliteDatabase(path: string): Database {
           `SELECT COUNT(*) AS n FROM filters
            WHERE height >= ? AND height <= ?`,
         )
-        .get(from, to) as { n: number };
-      return row.n;
+        .get(from, to) as { n: bigint | number };
+      return asInt(row.n);
     },
 
     minHeight() {
       const row = raw
         .query("SELECT MIN(height) AS h FROM filters")
-        .get() as { h: number | null };
-      return row.h ?? null;
+        .get() as { h: bigint | number | null };
+      return asIntOrNull(row.h);
     },
 
     maxHeight() {
       const row = raw
         .query("SELECT MAX(height) AS h FROM filters")
-        .get() as { h: number | null };
-      return row.h ?? null;
+        .get() as { h: bigint | number | null };
+      return asIntOrNull(row.h);
     },
 
     has(height) {
@@ -587,8 +602,8 @@ export function createSqliteDatabase(path: string): Database {
            ORDER BY f.height ASC
            LIMIT 1`,
         )
-        .get(from, to) as { height: number } | null;
-      return row?.height ?? null;
+        .get(from, to) as { height: bigint | number } | null;
+      return row ? asInt(row.height) : null;
     },
 
     missingRanges(from, to, maxSpan) {
@@ -632,11 +647,12 @@ export function createSqliteDatabase(path: string): Database {
            WHERE height >= ? AND height <= ?
            ORDER BY height ASC`,
         )
-        .all(from, to) as Array<{ height: number }>;
+        .all(from, to) as Array<{ height: bigint | number }>;
 
       const ranges: Array<{ from: number; to: number }> = [];
       let expect = from;
-      for (const { height } of rows) {
+      for (const row of rows) {
+        const height = asInt(row.height);
         if (height > expect) pushChunks(ranges, expect, height - 1);
         expect = height + 1;
       }
@@ -785,8 +801,8 @@ export function createSqliteDatabase(path: string): Database {
     count() {
       const row = raw
         .query("SELECT COUNT(*) AS n FROM matched_blocks")
-        .get() as { n: number };
-      return row.n;
+        .get() as { n: bigint | number };
+      return asInt(row.n);
     },
 
     listNeedingDownload(limit) {
@@ -803,11 +819,11 @@ export function createSqliteDatabase(path: string): Database {
            LIMIT ?`,
         )
         .all(n) as Array<{
-        height: number;
+        height: bigint | number;
         block_hash_internal_hex: string;
       }>;
       return rows.map((row) => ({
-        height: row.height,
+        height: asInt(row.height),
         blockHashInternalHex: row.block_hash_internal_hex,
       }));
     },
@@ -821,15 +837,15 @@ export function createSqliteDatabase(path: string): Database {
   const blocks: BlocksRepository = {
     count() {
       const row = raw.query("SELECT COUNT(*) AS n FROM blocks").get() as {
-        n: number;
+        n: bigint | number;
       };
-      return row.n;
+      return asInt(row.n);
     },
 
     has(height) {
       const row = raw
         .query("SELECT 1 AS ok FROM blocks WHERE height = ?")
-        .get(height) as { ok: number } | null;
+        .get(height) as { ok: bigint | number } | null;
       return row !== null;
     },
 
@@ -840,13 +856,13 @@ export function createSqliteDatabase(path: string): Database {
            FROM blocks WHERE height = ?`,
         )
         .get(height) as {
-        height: number;
+        height: bigint | number;
         block_hash_internal_hex: string;
         block: Uint8Array;
       } | null;
       if (!row) return null;
       return {
-        height: row.height,
+        height: asInt(row.height),
         blockHashInternalHex: row.block_hash_internal_hex,
         block: row.block,
       };
@@ -876,12 +892,12 @@ export function createSqliteDatabase(path: string): Database {
            LIMIT ?`,
         )
         .all(n) as Array<{
-        height: number;
+        height: bigint | number;
         block_hash_internal_hex: string;
         block: Uint8Array;
       }>;
       return rows.map((row) => ({
-        height: row.height,
+        height: asInt(row.height),
         blockHashInternalHex: row.block_hash_internal_hex,
         block: row.block,
       }));
@@ -907,8 +923,8 @@ export function createSqliteDatabase(path: string): Database {
     count() {
       const row = raw
         .query("SELECT COUNT(*) AS n FROM parsed_blocks")
-        .get() as { n: number };
-      return row.n;
+        .get() as { n: bigint | number };
+      return asInt(row.n);
     },
 
     clearFrom(fromHeight) {
@@ -936,21 +952,21 @@ export function createSqliteDatabase(path: string): Database {
 
   type TxRow = {
     txid: string;
-    height: number;
-    tx_index: number;
+    height: bigint | number;
+    tx_index: bigint | number;
     block_hash_internal_hex: string;
     tx: Uint8Array;
-    net_delta_sats: number;
+    net_delta_sats: bigint | number;
   };
 
   function rowToStoredTx(row: TxRow): StoredTx {
     return {
       txid: row.txid,
-      height: row.height,
-      txIndex: row.tx_index,
+      height: asInt(row.height),
+      txIndex: asInt(row.tx_index),
       blockHashInternalHex: row.block_hash_internal_hex,
       tx: row.tx,
-      netDeltaSats: row.net_delta_sats,
+      netDeltaSats: asInt(row.net_delta_sats),
     };
   }
 
@@ -1029,15 +1045,15 @@ export function createSqliteDatabase(path: string): Database {
     count() {
       const row = raw
         .query("SELECT COUNT(*) AS n FROM transactions")
-        .get() as { n: number };
-      return row.n;
+        .get() as { n: bigint | number };
+      return asInt(row.n);
     },
 
     minHeight() {
       const row = raw
         .query("SELECT MIN(height) AS h FROM transactions")
-        .get() as { h: number | null };
-      return row.h ?? null;
+        .get() as { h: bigint | number | null };
+      return asIntOrNull(row.h);
     },
 
     setNetDelta(txid, netDeltaSats) {

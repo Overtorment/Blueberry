@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import {
+  fromSqliteServices,
+  toSqliteServices,
+} from "../../src/db/peer-services.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 
 function basePeer(
@@ -23,6 +27,32 @@ function basePeer(
 }
 
 describe("SqliteDatabase peers", () => {
+  test("services helpers round-trip full unsigned 64-bit range", () => {
+    const high = 1n << 63n;
+    const max = (1n << 64n) - 1n;
+    expect(fromSqliteServices(toSqliteServices(0n))).toBe(0n);
+    expect(fromSqliteServices(toSqliteServices(2049n))).toBe(2049n);
+    expect(fromSqliteServices(toSqliteServices(high))).toBe(high);
+    expect(fromSqliteServices(toSqliteServices(max))).toBe(max);
+    expect(toSqliteServices(high)).toBe(-(1n << 63n));
+  });
+
+  test("high service bit survives upsert and service filters", () => {
+    const db = createSqliteDatabase(":memory:");
+    const high = 1n << 63n;
+    db.peers.upsert(
+      basePeer({ host: "9.9.9.9", services: high | 64n, alive: true }),
+    );
+    expect(db.peers.list()[0]?.services).toBe(high | 64n);
+    expect(
+      db.peers.listAliveWithServices(high, 10).map((p) => p.host),
+    ).toEqual(["9.9.9.9"]);
+    expect(
+      db.peers.listWithServices(64n, 10).map((p) => p.host),
+    ).toContain("9.9.9.9");
+    db.close();
+  });
+
   test("upsert round-trip and count", () => {
     const db = createSqliteDatabase(":memory:");
     expect(db.peers.count()).toBe(0);

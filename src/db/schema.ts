@@ -5,7 +5,7 @@ export function ensureSchema(raw: BunDatabase): void {
     CREATE TABLE IF NOT EXISTS peers (
       host TEXT NOT NULL,
       port INTEGER NOT NULL,
-      services TEXT NOT NULL DEFAULT '0',
+      services INTEGER NOT NULL DEFAULT 0,
       alive INTEGER NOT NULL DEFAULT 0,
       used_for_blocks INTEGER NOT NULL DEFAULT 0,
       last_probed_at INTEGER,
@@ -75,6 +75,8 @@ export function ensureSchema(raw: BunDatabase): void {
 
     CREATE INDEX IF NOT EXISTS headers_hash_internal_hex
       ON headers(hash_internal_hex);
+    CREATE INDEX IF NOT EXISTS filters_height_hash
+      ON filters(height, block_hash_internal_hex);
     CREATE INDEX IF NOT EXISTS peers_alive_used
       ON peers(alive, used_for_blocks);
   `);

@@ -1,9 +1,24 @@
 import { describe, expect, test } from "bun:test";
+import { Database as BunDatabase } from "bun:sqlite";
 import { hexToBytes } from "bitcoin-headers";
 import { checkpointDbRecord, checkpointSeedRecord } from "../../src/checkpoint.ts";
+import { ensureSchema } from "../../src/db/schema.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 
 describe("SqliteDatabase filters", () => {
+  test("schema creates a covering filter metadata index", () => {
+    const raw = new BunDatabase(":memory:");
+    ensureSchema(raw);
+    const columns = raw
+      .query("PRAGMA index_info('filters_height_hash')")
+      .all() as Array<{ seqno: number; name: string }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "height",
+      "block_hash_internal_hex",
+    ]);
+    raw.close();
+  });
+
   test("filters.filter round-trips as blob bytes", () => {
     const db = createSqliteDatabase(":memory:");
     const bytes = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
