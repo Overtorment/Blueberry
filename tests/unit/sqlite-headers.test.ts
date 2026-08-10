@@ -26,7 +26,7 @@ describe("SqliteDatabase headers", () => {
         ...checkpointDbRecord(),
         hashInternalHex: "00".repeat(32),
       }),
-    ).toThrow(/checkpoint mismatch:.*Delete data\/blueberry\.sqlite/s);
+    ).toThrow(/checkpoint mismatch:.*Delete blueberry\.data\/blueberry\.sqlite/s);
     db.close();
   });
 

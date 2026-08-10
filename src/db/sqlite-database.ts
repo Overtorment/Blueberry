@@ -324,7 +324,7 @@ export function createSqliteDatabase(path: string): Database {
         throw new Error(
           `checkpoint mismatch: stored height ${existing.height} hashInternalHex ${existing.hashInternalHex}, ` +
             `expected height ${checkpoint.height} hashInternalHex ${checkpoint.hashInternalHex}. ` +
-            `Delete data/blueberry.sqlite (or clear headers rows) and restart.`,
+            `Delete blueberry.data/blueberry.sqlite (or clear headers rows) and restart.`,
         );
       }
     },

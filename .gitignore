@@ -7,6 +7,6 @@ dist/
 !.env.example
 .DS_Store
 *.tsbuildinfo
-/data*
+/*.data
 .worktrees/
 .superpowers/

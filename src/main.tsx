@@ -57,10 +57,10 @@ import {
 } from "./wallet/secret.ts";
 import { createWallet } from "./wallet/wallet.ts";
 
-mkdirSync("./data", { recursive: true });
-initFileLog("./data/blueberry.log");
+mkdirSync("./blueberry.data", { recursive: true });
+initFileLog("./blueberry.data/blueberry.log");
 log("main", "boot");
-const db = createSqliteDatabase("./data/blueberry.sqlite");
+const db = createSqliteDatabase("./blueberry.data/blueberry.sqlite");
 
 const gate = resolveOnboardingGate(
   inspectWalletSecret(db),
