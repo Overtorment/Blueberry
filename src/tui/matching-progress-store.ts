@@ -1,5 +1,5 @@
 export type MatchingProgress = {
-  matched: number;
+  scanned: number;
   total: number;
   at: number | null;
   etaMs: number | null;
@@ -8,20 +8,20 @@ export type MatchingProgress = {
 
 export type MatchingProgressStore = {
   get(): MatchingProgress;
-  applyEvent(ev: { at: number; matched: number; total: number }): void;
+  applyEvent(ev: { at: number; scanned: number; total: number }): void;
   subscribe(listener: () => void): () => void;
 };
 
 /** ETA from the first real advance — ignore the TUI seed sample. */
 export function createMatchingProgressStore(): MatchingProgressStore {
-  let matched = 0;
+  let scanned = 0;
   let total = 0;
   let at: number | null = null;
   let originAt: number | null = null;
-  let originMatched: number | null = null;
+  let originScanned: number | null = null;
   let seeded = false;
   let snapshot: MatchingProgress = {
-    matched: 0,
+    scanned: 0,
     total: 0,
     at: null,
     etaMs: null,
@@ -30,24 +30,24 @@ export function createMatchingProgressStore(): MatchingProgressStore {
   const listeners = new Set<() => void>();
 
   function etaFor(
-    nextMatched: number,
+    nextScanned: number,
     nextTotal: number,
     nextAt: number,
   ): number | null {
-    if (nextTotal > 0 && nextMatched >= nextTotal) return 0;
-    if (originAt === null || originMatched === null) return null;
-    if (nextMatched <= originMatched) return null;
+    if (nextTotal > 0 && nextScanned >= nextTotal) return 0;
+    if (originAt === null || originScanned === null) return null;
+    if (nextScanned <= originScanned) return null;
     const dt = nextAt - originAt;
     if (dt <= 0) return null;
-    const rate = (nextMatched - originMatched) / dt;
+    const rate = (nextScanned - originScanned) / dt;
     if (rate <= 0) return null;
-    return Math.round((nextTotal - nextMatched) / rate);
+    return Math.round((nextTotal - nextScanned) / rate);
   }
 
   function publish(etaMs: number | null): void {
     const percent =
-      total === 0 ? 0 : Math.min(100, Math.floor((100 * matched) / total));
-    snapshot = { matched, total, at, etaMs, percent };
+      total === 0 ? 0 : Math.min(100, Math.floor((100 * scanned) / total));
+    snapshot = { scanned, total, at, etaMs, percent };
     for (const listener of [...listeners]) listener();
   }
 
@@ -59,38 +59,38 @@ export function createMatchingProgressStore(): MatchingProgressStore {
       const nextPercent =
         ev.total === 0
           ? 0
-          : Math.min(100, Math.floor((100 * ev.matched) / ev.total));
+          : Math.min(100, Math.floor((100 * ev.scanned) / ev.total));
 
-      const wasDone = total > 0 && matched >= total;
-      const isDone = ev.total > 0 && ev.matched >= ev.total;
+      const wasDone = total > 0 && scanned >= total;
+      const isDone = ev.total > 0 && ev.scanned >= ev.total;
 
       let nextEta: number | null;
       if (isDone) {
         nextEta = 0;
         // Drop origin so a later resume does not rate across idle time.
         originAt = null;
-        originMatched = null;
+        originScanned = null;
       } else if (!seeded) {
         nextEta = null;
         seeded = true;
       } else {
-        if (ev.matched < matched || wasDone) {
+        if (ev.scanned < scanned || wasDone) {
           originAt = null;
-          originMatched = null;
+          originScanned = null;
         }
         if (originAt === null) {
-          if (ev.matched > matched) {
+          if (ev.scanned > scanned) {
             originAt = ev.at;
-            originMatched = ev.matched;
+            originScanned = ev.scanned;
           }
           nextEta = null;
         } else {
-          nextEta = etaFor(ev.matched, ev.total, ev.at);
+          nextEta = etaFor(ev.scanned, ev.total, ev.at);
         }
       }
 
       if (
-        matched === ev.matched &&
+        scanned === ev.scanned &&
         total === ev.total &&
         at === ev.at &&
         snapshot.etaMs === nextEta &&
@@ -98,7 +98,7 @@ export function createMatchingProgressStore(): MatchingProgressStore {
       ) {
         return;
       }
-      matched = ev.matched;
+      scanned = ev.scanned;
       total = ev.total;
       at = ev.at;
       publish(nextEta);

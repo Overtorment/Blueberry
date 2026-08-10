@@ -148,9 +148,9 @@ describe("filters-matching", () => {
       new Uint8Array([0x00, 0x14, ...new Uint8Array(20).fill(0xcf)]),
     ]);
 
-    const events: Array<{ matched: number; total: number }> = [];
+    const events: Array<{ scanned: number; total: number }> = [];
     bus.on("matching:progress", (p) => {
-      events.push({ matched: p.matched, total: p.total });
+      events.push({ scanned: p.scanned, total: p.total });
     });
 
     const mod = createFiltersMatchingModule(
@@ -163,11 +163,11 @@ describe("filters-matching", () => {
       },
     );
     await mod.start();
-    expect(events[0]).toEqual({ matched: 1, total: 3 });
+    expect(events[0]).toEqual({ scanned: 1, total: 3 });
     await waitFor(
       () => events.length >= 3 && db.filters.countScanned() === 3,
     );
-    expect(events.map((e) => e.matched)).toEqual([1, 2, 3]);
+    expect(events.map((e) => e.scanned)).toEqual([1, 2, 3]);
     expect(events.every((e) => e.total === 3)).toBe(true);
     await mod.stop();
     db.close();

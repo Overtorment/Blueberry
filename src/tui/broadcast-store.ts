@@ -102,7 +102,7 @@ export function createBroadcastStore(): BroadcastStore {
           attempt: snap.attempt,
           maxAttempts: snap.maxAttempts,
           peer: payload.peer,
-          detail: `Broadcast via ${payload.peer}`,
+          detail: `Sent via ${payload.peer}`,
           error: null,
         };
       } else {

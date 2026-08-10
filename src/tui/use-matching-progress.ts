@@ -5,7 +5,7 @@ import type {
 } from "./matching-progress-store.ts";
 
 const emptyProgress: MatchingProgress = {
-  matched: 0,
+  scanned: 0,
   total: 0,
   at: null,
   etaMs: null,

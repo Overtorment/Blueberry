@@ -247,15 +247,13 @@ async function startApp(db: Database): Promise<void> {
   // Re-seed after mount in case the first paint raced the store subscription.
   matchingProgressStore.applyEvent({
     at: Date.now(),
-    matched: db.filters.countScanned(),
+    scanned: db.filters.countScanned(),
     total: db.filters.count(),
   });
 
   for (const mod of domainModules) {
     void startModule(mod);
   }
-
-  bus.emit("app:started", { at: Date.now() });
 
   let shuttingDown = false;
 

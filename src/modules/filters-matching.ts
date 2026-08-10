@@ -39,7 +39,7 @@ export function createFiltersMatchingModule(
   let unsubProgress: (() => void) | undefined;
   let loopPromise: Promise<void> | undefined;
   let loadedGaps: WatchGaps | undefined;
-  let matchedCount = 0;
+  let scannedCount = 0;
   let totalCount = 0;
 
   function kick() {
@@ -69,13 +69,13 @@ export function createFiltersMatchingModule(
   function emitProgress(): void {
     ctx.bus.emit("matching:progress", {
       at: Date.now(),
-      matched: matchedCount,
+      scanned: scannedCount,
       total: totalCount,
     });
   }
 
   function seedProgress(): void {
-    matchedCount = ctx.db.filters.countScanned();
+    scannedCount = ctx.db.filters.countScanned();
     totalCount = ctx.db.filters.count();
     emitProgress();
   }
@@ -109,8 +109,8 @@ export function createFiltersMatchingModule(
               ctx.bus.emit("filters:match", m);
             },
             onProgress: (p) => {
-              if (p.matched === matchedCount && p.total === totalCount) return;
-              matchedCount = p.matched;
+              if (p.scanned === scannedCount && p.total === totalCount) return;
+              scannedCount = p.scanned;
               totalCount = p.total;
               emitProgress();
             },

@@ -1,36 +1,22 @@
 export type ModuleStatus = "starting" | "running" | "stopped" | "error";
 
-/** Live peer TCP socket kinds (BIP-324). */
+/** Peer work kind for `peers:sockets` counts. */
 export type PeerSocketKind = "probe" | "hdr" | "filt" | "blk";
 
 /**
- * Typed event catalog for the in-process message bus.
+ * Typed in-process event catalog.
  *
- * Keys are event names. Values are the payload shape for that event.
- * Modules talk only through this bus. They do not call each other.
+ * Events are short-lived notifications. Durable state lives in the database.
+ * Modules may share the DB; they do not import each other.
  *
- * Time fields named `at` are Unix milliseconds (`Date.now()`).
+ * `at` fields are Unix milliseconds (`Date.now()`).
  */
 export type EventMap = {
   /**
-   * App boot finished.
+   * One module status update.
    *
-   * Main emits this once after modules start and the TUI is ready.
-   * Listeners can treat this as "the process is up".
-   *
-   * @property at - Time when the app finished starting.
-   */
-  "app:started": { at: number };
-
-  /**
-   * Lifecycle status for one module.
-   *
-   * Each module emits this when it starts, runs, stops, or hits an error.
-   * The TUI shows these statuses. Other modules may ignore them.
-   *
-   * @property module - Module name (for example `"chain-headers"`).
-   * @property status - Current lifecycle state.
-   * @property detail - Optional short note (often used with `"error"`).
+   * Used for start/run/stop and also for short incident notes.
+   * Not every module emits every status value.
    */
   "module:status": {
     module: string;
@@ -38,32 +24,14 @@ export type EventMap = {
     detail?: string;
   };
 
-  /**
-   * Peer set changed.
-   *
-   * Emitted when discovery adds, updates, or removes peers.
-   * Sync modules often use this as a wake signal to retry work.
-   * The TUI may refresh peer counts.
-   *
-   * @property at - Time of the update.
-   */
+  /** Peer table changed. Often a wake signal; listeners may re-read the DB. */
   "peers:updated": { at: number };
 
   /**
-   * Open peer TCP sockets for one socket kind.
+   * Active peer work for one kind.
    *
-   * Modules report how many live sockets they hold for that kind.
-   * The TUI merges counts by `kind` and shows them in the peer view.
-   *
-   * Kinds:
-   * - `probe` — short connections used to find or check peers
-   * - `hdr` — header sync
-   * - `filt` — compact filter download
-   * - `blk` — block download
-   *
-   * @property at - Time of the report.
-   * @property kind - Which peer socket pool this count describes.
-   * @property open - Number of open sockets of that kind right now.
+   * `open` is the producer’s in-flight count (jobs or probes).
+   * It may include work before a TCP socket is open.
    */
   "peers:sockets": {
     at: number;
@@ -72,33 +40,24 @@ export type EventMap = {
   };
 
   /**
-   * Header sync progress.
+   * Header sync snapshot.
    *
-   * Emitted while the chain-headers module downloads and stores headers.
-   * Filter download and the TUI listen for this to stay aligned with tip.
-   *
-   * @property at - Time of the progress report.
-   * @property downloaded - Headers downloaded in this sync run so far.
-   * @property total - Headers this run expects to download.
-   * @property height - Absolute chain tip height that headers are synced to.
+   * `downloaded` / `total` are heights from the sync checkpoint to tip /
+   * peer tip, not counts from the current run only.
    */
   "headers:progress": {
     at: number;
     downloaded: number;
     total: number;
+    /** Local header tip height. */
     height: number;
   };
 
   /**
-   * Compact filter download progress.
+   * Compact-filter download snapshot.
    *
-   * Emitted while filters-download (and sometimes parse-blocks) reports
-   * how many BIP157/158 filters are on disk versus needed.
-   * Matching and the TUI use this to show progress and wake work.
-   *
-   * @property at - Time of the progress report.
-   * @property downloaded - Filters stored so far.
-   * @property total - Filters needed for the current goal.
+   * `total` is the active birthday-to-tip range when known.
+   * Wake listeners may ignore the payload and re-read the DB.
    */
   "filters:progress": {
     at: number;
@@ -107,13 +66,10 @@ export type EventMap = {
   };
 
   /**
-   * One compact filter matched the wallet.
+   * One filter hit the wallet watchlist.
    *
-   * filters-matching emits this for each hit. blocks-download uses it
-   * to queue that block. The TUI may refresh match-related UI.
-   *
-   * @property height - Block height of the match.
-   * @property blockHashInternalHex - Block hash in internal hex form.
+   * The DB row is already inserted before emit. Payload is optional context;
+   * many listeners only use this as a wake signal.
    */
   "filters:match": {
     height: number;
@@ -121,30 +77,20 @@ export type EventMap = {
   };
 
   /**
-   * Filter-matching progress.
+   * Filter scan progress against the wallet.
    *
-   * Emitted while filters-matching scans downloaded filters against the wallet.
-   * The TUI shows how many filters are already checked.
-   *
-   * @property at - Time of the progress report.
-   * @property matched - Filters already scanned against the wallet.
-   * @property total - Filters known in storage (scanned + not yet scanned).
+   * `scanned` is filters already checked (`countScanned`), not hit count.
    */
   "matching:progress": {
     at: number;
-    matched: number;
+    scanned: number;
     total: number;
   };
 
   /**
-   * Block download progress.
+   * Full-block download snapshot.
    *
-   * Emitted while blocks-download fetches full blocks for filter matches.
-   * parse-blocks and the TUI listen to refresh work and UI.
-   *
-   * @property at - Time of the progress report.
-   * @property downloaded - Full blocks stored so far.
-   * @property matched - Matched block hashes known so far (need download or done).
+   * `matched` is known matched-block rows; `downloaded` is stored full blocks.
    */
   "blocks:progress": {
     at: number;
@@ -152,80 +98,33 @@ export type EventMap = {
     matched: number;
   };
 
-  /**
-   * Sync is idle: no catch-up work pending right now.
-   *
-   * sync-idle emits this when headers, filters, blocks, and peers look settled.
-   * Network modules use it to pause aggressive sync or probe less often.
-   *
-   * @property at - Time when idle was detected.
-   */
+  /** Sync evaluator entered idle (settled). */
   "sync:idle": { at: number };
 
-  /**
-   * Sync must catch up again.
-   *
-   * sync-idle emits this when something falls behind after idle.
-   * Network modules use it to resume download or discovery.
-   *
-   * @property at - Time when catch-up was requested.
-   * @property reason - Which area fell behind:
-   *   `headers`, `filters`, `blocks`, or `peers`.
-   */
+  /** Sync evaluator left idle; resume catch-up work. */
   "sync:catchup": {
     at: number;
     reason: "headers" | "filters" | "blocks" | "peers";
   };
 
   /**
-   * Wallet transaction set changed.
+   * Wallet tx UI should refresh.
    *
-   * parse-blocks emits this after it parses blocks and updates wallet txs.
-   * The TUI reloads the transaction list when it hears this.
-   *
-   * @property at - Time of the wallet update.
+   * Emitted after parse/update work. The set may be unchanged.
    */
   "wallet:txs": { at: number };
 
-  /**
-   * Ask the broadcast module to send a raw transaction.
-   *
-   * The TUI (or another UI action) emits this with a unique `id` and tx hex.
-   * broadcast listens and starts peer broadcast attempts for that job.
-   *
-   * @property id - Caller-chosen job id used to track cancel/progress/done.
-   * @property txHex - Raw transaction bytes as hex.
-   */
+  /** Start broadcasting one raw transaction. */
   "broadcast:request": { id: string; txHex: string };
 
-  /**
-   * Cancel an in-flight broadcast job.
-   *
-   * Emit the same `id` used in `broadcast:request`.
-   * broadcast stops further attempts for that job when it can.
-   *
-   * @property id - Job id from the matching `broadcast:request`.
-   */
+  /** Cancel the broadcast job with this `id`, if it is active. */
   "broadcast:cancel": { id: string };
 
   /**
-   * Progress update for one broadcast job.
+   * Broadcast job progress.
    *
-   * broadcast emits this while it waits for peers, tries a peer, or records
-   * a failed attempt. The TUI shows phase text to the user.
-   *
-   * Phases:
-   * - `waiting-peers` — no suitable peer yet
-   * - `attempt` — sending to a peer now
-   * - `failed-attempt` — that peer try failed; may retry
-   * - `error` — a hard error on this update (final result still uses `broadcast:done`)
-   *
-   * @property id - Job id from `broadcast:request`.
-   * @property phase - What the broadcaster is doing now.
-   * @property attempt - Optional 1-based attempt number.
-   * @property maxAttempts - Optional attempt limit for this job.
-   * @property peer - Optional peer address for this update.
-   * @property detail - Optional short human-readable note.
+   * Phases: `waiting-peers`, `attempt`, `failed-attempt`, `error`.
+   * Final outcome still arrives on `broadcast:done`.
    */
   "broadcast:progress": {
     id: string;
@@ -237,16 +136,10 @@ export type EventMap = {
   };
 
   /**
-   * Final result for one broadcast job.
+   * Broadcast job finished.
    *
-   * Success payload: `ok: true` and the peer that accepted the tx.
-   * Failure payload: `ok: false` and an error string.
-   * The TUI closes or updates the broadcast UI from this event.
-   *
-   * @property id - Job id from `broadcast:request`.
-   * @property ok - `true` if a peer accepted the tx; otherwise `false`.
-   * @property peer - (success) Peer that accepted the transaction.
-   * @property error - (failure) Why broadcast stopped.
+   * `ok: true` means the peer did not reject the tx. Timeout or disconnect
+   * without a reject also counts as success on this path.
    */
   "broadcast:done":
     | { id: string; ok: true; peer: string }
@@ -254,30 +147,15 @@ export type EventMap = {
 };
 
 /**
- * In-process typed pub/sub bus.
+ * In-process typed pub/sub.
  *
- * `emit` calls matching handlers in the same turn.
- * Handler errors are swallowed so one bad listener does not break others.
- * `on` returns a function that removes that handler.
+ * `emit` calls handlers in the same turn. Handlers must be synchronous;
+ * thrown errors are swallowed. `on` returns an unsubscribe function.
  */
 export interface MessageBus {
-  /**
-   * Subscribe to one event name.
-   *
-   * @param event - Event key from {@link EventMap}.
-   * @param handler - Called with that event's payload on each emit.
-   * @returns Unsubscribe function.
-   */
   on<K extends keyof EventMap>(
     event: K,
     handler: (payload: EventMap[K]) => void,
   ): () => void;
-
-  /**
-   * Publish one event to all current subscribers.
-   *
-   * @param event - Event key from {@link EventMap}.
-   * @param payload - Payload that matches that event.
-   */
   emit<K extends keyof EventMap>(event: K, payload: EventMap[K]): void;
 }
