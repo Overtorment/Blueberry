@@ -58,6 +58,37 @@ describe("SqliteDatabase filters", () => {
     db.close();
   });
 
+  test("wipeFiltersFrom removes filters and filter headers atomically", () => {
+    const db = createSqliteDatabase(":memory:");
+    db.filterHeaders.append([
+      { height: 9, header: hexToBytes("09".repeat(32)) },
+      { height: 10, header: hexToBytes("0a".repeat(32)) },
+      { height: 11, header: hexToBytes("0b".repeat(32)) },
+    ]);
+    db.filters.append([
+      {
+        height: 10,
+        blockHashInternalHex: "0a".repeat(32),
+        filter: new Uint8Array([1]),
+      },
+      {
+        height: 11,
+        blockHashInternalHex: "0b".repeat(32),
+        filter: new Uint8Array([2]),
+      },
+    ]);
+
+    db.wipeFiltersFrom(10, { prevHeaderHeight: 9 });
+
+    expect(db.filters.get(10)).toBeNull();
+    expect(db.filters.get(11)).toBeNull();
+    expect(db.filters.count()).toBe(0);
+    expect(db.filterHeaders.get(9)).toBeNull();
+    expect(db.filterHeaders.get(10)).toBeNull();
+    expect(db.filterHeaders.tip()).toBeNull();
+    db.close();
+  });
+
   test("filters missingRanges splits gaps by maxSpan", () => {
     const db = createSqliteDatabase(":memory:");
     db.filters.append([

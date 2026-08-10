@@ -209,5 +209,13 @@ export interface Database {
   transaction(fn: () => void): void;
   /** Delete height-dependent chain rows with height > ancestorHeight. */
   rewindAfter(ancestorHeight: number): void;
+  /**
+   * Delete filters and filter headers with height >= height in one transaction.
+   * Optional prevHeaderHeight also deletes that exact filter-header row.
+   */
+  wipeFiltersFrom(
+    height: number,
+    options?: { prevHeaderHeight?: number },
+  ): void;
   close(): void;
 }

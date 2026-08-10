@@ -167,11 +167,12 @@ export function createFiltersDownloadModule(
   }
 
   function wipeFilterTablesFrom(height: number, rangeFrom: number): void {
-    ctx.db.filters.deleteFrom(height);
-    ctx.db.filterHeaders.deleteFrom(height);
-    if (height === rangeFrom && rangeFrom > 0) {
-      ctx.db.filterHeaders.deleteFrom(rangeFrom - 1);
-    }
+    ctx.db.wipeFiltersFrom(
+      height,
+      height === rangeFrom && rangeFrom > 0
+        ? { prevHeaderHeight: rangeFrom - 1 }
+        : undefined,
+    );
     hashCheckedThrough = Math.min(hashCheckedThrough, height - 1);
   }
 

@@ -1077,6 +1077,24 @@ export function createSqliteDatabase(path: string): Database {
     });
   }
 
+  function wipeFiltersFrom(
+    height: number,
+    options?: { prevHeaderHeight?: number },
+  ): void {
+    inTx(() => {
+      raw.query("DELETE FROM filters_unscanned WHERE height >= ?").run(height);
+      raw.query("DELETE FROM filters WHERE height >= ?").run(height);
+      raw.query("DELETE FROM filter_headers WHERE height >= ?").run(height);
+      if (options?.prevHeaderHeight !== undefined) {
+        raw
+          .query("DELETE FROM filter_headers WHERE height = ?")
+          .run(options.prevHeaderHeight);
+      }
+      filterCountCache = null;
+      unscannedCountCache = null;
+    });
+  }
+
   return {
     peers,
     headers,
@@ -1092,6 +1110,7 @@ export function createSqliteDatabase(path: string): Database {
       inTx(fn);
     },
     rewindAfter,
+    wipeFiltersFrom,
     close() {
       raw.close();
     },
