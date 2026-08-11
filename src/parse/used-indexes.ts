@@ -2,9 +2,9 @@ import { Transaction } from "bitcoinjs-lib";
 import type { WatchWallet } from "../wallet/types.ts";
 import {
   outpointKey,
-  p2wpkhScriptFromPubkey,
   prevoutTxidDisplay,
   scriptHex,
+  watchedScriptsFromInput,
 } from "./extract.ts";
 
 export function usedWatchIndexes(
@@ -52,15 +52,9 @@ export function usedWatchIndexes(
         );
         if (outInfo) markUsed(outInfo.change, outInfo.index);
 
-        const wit = inn.witness;
-        if (wit.length >= 2) {
-          const pk = wit[wit.length - 1]!;
-          if (pk.length === 33) {
-            const info = scriptToIndex.get(
-              scriptHex(p2wpkhScriptFromPubkey(pk)),
-            );
-            if (info) markUsed(info.change, info.index);
-          }
+        for (const script of watchedScriptsFromInput(inn)) {
+          const info = scriptToIndex.get(scriptHex(script));
+          if (info) markUsed(info.change, info.index);
         }
       }
     }
