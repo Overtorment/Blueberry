@@ -2,6 +2,7 @@ import { HDKey } from "@scure/bip32";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import { p2pkh, p2sh, p2tr, p2wpkh } from "@scure/btc-signer";
 import { secp256k1 } from "@noble/curves/secp256k1";
+import { address as btcAddress } from "bitcoinjs-lib";
 import { config } from "../config.ts";
 import type {
   AddressScriptType,
@@ -80,6 +81,53 @@ function deriveWifWatchWallet(wif: string): WatchWallet {
   };
 }
 
+function scriptTypeFromAddress(addr: string): AddressScriptType {
+  const lower = addr.toLowerCase();
+  if (lower.startsWith("bc1")) {
+    const decoded = btcAddress.fromBech32(addr);
+    if (decoded.version === 1) return "p2tr";
+    return "p2wpkh";
+  }
+  const { version } = btcAddress.fromBase58Check(addr);
+  if (version === 0x00) return "p2pkh";
+  if (version === 0x05) return "p2sh-p2wpkh";
+  throw new Error("unsupported address version");
+}
+
+function outputScriptFromAddress(address: string): Uint8Array {
+  const lower = address.toLowerCase();
+  if (lower.startsWith("bc1")) {
+    const decoded = btcAddress.fromBech32(address);
+    if (decoded.version === 1 && decoded.data.length === 32) {
+      const script = new Uint8Array(34);
+      script[0] = 0x51;
+      script[1] = 0x20;
+      script.set(decoded.data, 2);
+      return script;
+    }
+  }
+  return new Uint8Array(btcAddress.toOutputScript(address));
+}
+
+function deriveAddressWatchWallet(address: string): WatchWallet {
+  const scriptPubKey = outputScriptFromAddress(address);
+  const scriptType = scriptTypeFromAddress(address);
+  const watchAddr: WatchAddress = {
+    path: "address/0",
+    index: 0,
+    change: false,
+    address,
+    scriptPubKey,
+    scriptType,
+  };
+  return {
+    kind: "address",
+    secret: address,
+    addresses: [watchAddr],
+    scripts: [scriptPubKey],
+  };
+}
+
 function deriveBip84WatchWallet(
   secret: string,
   kind: "mnemonic" | "zpub",
@@ -134,6 +182,9 @@ export function deriveWatchWallet(
   const parsed = parseWalletSecret(secret);
   if (parsed.kind === "wif") {
     return deriveWifWatchWallet(parsed.value);
+  }
+  if (parsed.kind === "address") {
+    return deriveAddressWatchWallet(parsed.value);
   }
   return deriveBip84WatchWallet(
     parsed.value,

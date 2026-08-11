@@ -5,7 +5,7 @@ export type AddressScriptType =
   | "p2wpkh"
   | "p2tr";
 
-export type WatchWalletKind = "bip84" | "wif";
+export type WatchWalletKind = "bip84" | "wif" | "address";
 
 export type WatchAddress = {
   path: string;
