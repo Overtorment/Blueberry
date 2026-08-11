@@ -13,7 +13,6 @@ import {
   utxoValueBar,
 } from "../parse/format.ts";
 import type { Wallet } from "../wallet/wallet.ts";
-import { estimateEtaMs, nextProgressSamples } from "./progress-eta.ts";
 
 export type WalletTxRow = {
   txid: string;
@@ -166,7 +165,6 @@ export function snapshotFromDb(
 
 export function createWalletTxsStore(): WalletTxsStore {
   let snapshot = emptyWalletTxsSnapshot;
-  let samples: { at: number; downloaded: number }[] = [];
   const listeners = new Set<() => void>();
 
   return {
@@ -174,26 +172,7 @@ export function createWalletTxsStore(): WalletTxsStore {
       return snapshot;
     },
     apply(next) {
-      const prev = {
-        downloaded: snapshot.blocksParsed,
-        total: snapshot.blocksTotal,
-      };
-      if (next.at === null) {
-        samples = [];
-        snapshot = { ...next, etaMs: null };
-      } else {
-        const nextSamples = nextProgressSamples(samples, prev, {
-          at: next.at,
-          downloaded: next.blocksParsed,
-          total: next.blocksTotal,
-        });
-        const hasBacklog = next.blocksTotal > next.blocksParsed;
-        const nextEta = hasBacklog
-          ? estimateEtaMs(nextSamples, next.blocksTotal)
-          : null;
-        samples = nextSamples;
-        snapshot = { ...next, etaMs: nextEta };
-      }
+      snapshot = { ...next, etaMs: null };
       for (const listener of [...listeners]) listener();
     },
     subscribe(listener) {
