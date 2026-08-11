@@ -128,10 +128,11 @@ export function createParseBlocksModule(
     const scripts = wallet.scripts();
     const utxos = buildUtxoMap(ctx.db.transactions.list(), scripts);
     for (let i = 0; i < blocks.length; i++) {
-      if (stopped) return;
+      if (stopped || !allowed) return;
       const block = blocks[i]!;
       if (ctx.db.parsedBlocks.has(block.height)) continue;
       await yieldOnce();
+      if (stopped || !allowed) return;
       try {
         const parsed = Block.fromBuffer(Buffer.from(block.block));
         const watchTxs = extractWatchTxs(parsed, scripts, utxos);
@@ -163,6 +164,7 @@ export function createParseBlocksModule(
       if (i + 1 < blocks.length) {
         if (blockGapMs > 0) await sleep(blockGapMs);
         else await yieldOnce();
+        if (stopped || !allowed) return;
       }
     }
 
