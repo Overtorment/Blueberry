@@ -2,7 +2,10 @@ import { HDKey } from "@scure/bip32";
 import { validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 import { WIF } from "@scure/btc-signer";
-import { isAddressValid } from "./is-address-valid.ts";
+import {
+  isAddressValid,
+  watchAddressScriptType,
+} from "./is-address-valid.ts";
 
 /** SLIP-0132 mainnet BIP84 (zpub/zprv). */
 export const BIP84_ZPUB_VERSIONS = {
@@ -36,6 +39,17 @@ function looksLikeWifCandidate(value: string): boolean {
   if (/\s/.test(value)) return false;
   if (value.length < 51 || value.length > 52) return false;
   return /^[5KL9c]/.test(value);
+}
+
+/** Address-like input that deserves an address-specific validation error. */
+function looksLikeAddressCandidate(value: string): boolean {
+  if (/^(?:bc1|tb1|bcrt1)/i.test(value)) return true;
+  const compact = value.replace(/\s/g, "");
+  return (
+    compact.length >= 26 &&
+    compact.length <= 35 &&
+    /^[13mn2]/i.test(compact)
+  );
 }
 
 /**
@@ -91,7 +105,11 @@ export function parseWalletSecret(raw: string): ParsedWalletSecret {
   }
 
   if (isAddressValid(value)) {
+    watchAddressScriptType(value);
     return { kind: "address", value };
+  }
+  if (looksLikeAddressCandidate(value)) {
+    throw new Error("invalid mainnet address");
   }
 
   if (!validateMnemonic(value, wordlist)) {

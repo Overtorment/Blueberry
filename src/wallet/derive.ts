@@ -14,6 +14,7 @@ import {
   decodeWifPrivateKey,
   parseWalletSecret,
 } from "./secret.ts";
+import { watchAddressScriptType } from "./is-address-valid.ts";
 
 /** BIP84 account path (mainnet). */
 export const BIP84_ACCOUNT_PATH = "m/84'/0'/0'";
@@ -81,19 +82,6 @@ function deriveWifWatchWallet(wif: string): WatchWallet {
   };
 }
 
-function scriptTypeFromAddress(addr: string): AddressScriptType {
-  const lower = addr.toLowerCase();
-  if (lower.startsWith("bc1")) {
-    const decoded = btcAddress.fromBech32(addr);
-    if (decoded.version === 1) return "p2tr";
-    return "p2wpkh";
-  }
-  const { version } = btcAddress.fromBase58Check(addr);
-  if (version === 0x00) return "p2pkh";
-  if (version === 0x05) return "p2sh-p2wpkh";
-  throw new Error("unsupported address version");
-}
-
 function outputScriptFromAddress(address: string): Uint8Array {
   const lower = address.toLowerCase();
   if (lower.startsWith("bc1")) {
@@ -111,7 +99,7 @@ function outputScriptFromAddress(address: string): Uint8Array {
 
 function deriveAddressWatchWallet(address: string): WatchWallet {
   const scriptPubKey = outputScriptFromAddress(address);
-  const scriptType = scriptTypeFromAddress(address);
+  const scriptType = watchAddressScriptType(address);
   const watchAddr: WatchAddress = {
     path: "address/0",
     index: 0,
