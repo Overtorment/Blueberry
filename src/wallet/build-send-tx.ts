@@ -2,6 +2,7 @@ import { hex } from "@scure/base";
 import { HDKey } from "@scure/bip32";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import { secp256k1 } from "@noble/curves/secp256k1";
+import { address as btcAddress } from "bitcoinjs-lib";
 import {
   bip32Path,
   p2pkh,
@@ -102,7 +103,8 @@ type AccountKey =
       kind: "wif";
       privateKey: Uint8Array;
       publicKey: Uint8Array;
-    };
+    }
+  | { kind: "address" };
 
 function accountKey(secret: string): AccountKey {
   const parsed = parseWalletSecret(secret);
@@ -121,6 +123,9 @@ function accountKey(secret: string): AccountKey {
       key: root,
       masterFingerprint: root.fingerprint,
     };
+  }
+  if (parsed.kind === "address") {
+    return { kind: "address" };
   }
   const account = HDKey.fromExtendedKey(parsed.value, BIP84_ZPUB_VERSIONS);
   return {
@@ -287,6 +292,38 @@ function buildDraftTx(params: BuildSendTxParams): {
       };
     }
 
+    if (account.kind === "address") {
+      if (scriptType === "p2pkh" && !u.nonWitnessUtxo) {
+        throw new Error(
+          "legacy p2pkh input requires nonWitnessUtxo (previous transaction)",
+        );
+      }
+      if (scriptType === "p2tr") {
+        const decoded = btcAddress.fromBech32(addr.address);
+        const spend = p2tr(decoded.data);
+        return {
+          ...spend,
+          txid: hex.decode(u.txid),
+          index: u.vout,
+          witnessUtxo: {
+            script: u.scriptPubKey,
+            amount: u.valueSats,
+          },
+        };
+      }
+      return {
+        txid: hex.decode(u.txid),
+        index: u.vout,
+        witnessUtxo: {
+          script: u.scriptPubKey,
+          amount: u.valueSats,
+        },
+        ...(u.nonWitnessUtxo
+          ? { nonWitnessUtxo: u.nonWitnessUtxo }
+          : {}),
+      };
+    }
+
     // BIP84 HD: always p2wpkh
     const pubkey = publicKeyAtAddress(account, addr);
     const spend = p2wpkh(pubkey);
@@ -319,7 +356,7 @@ function buildDraftTx(params: BuildSendTxParams): {
  */
 export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult {
   const { tx, signPaths, account } = buildDraftTx(params);
-  if (account.kind === "zpub") {
+  if (account.kind === "zpub" || account.kind === "address") {
     throw new Error("signing requires a mnemonic or WIF wallet secret");
   }
   if (account.kind === "wif") {
@@ -343,7 +380,7 @@ export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult 
 }
 
 /**
- * Build an unsigned PSBT (no signing). Works with mnemonic, zpub, or WIF.
+ * Build an unsigned PSBT (no signing). Works with mnemonic, zpub, WIF, or address.
  */
 export function buildUnsignedSendPsbt(
   params: BuildSendTxParams,
@@ -362,7 +399,7 @@ export function buildUnsignedSendPsbt(
 }
 
 /**
- * Mnemonic/WIF → signed tx hex; zpub → unsigned PSBT for air-gapped / hardware signing.
+ * Mnemonic/WIF → signed tx hex; zpub/address → unsigned PSBT.
  */
 export function buildSend(params: BuildSendTxParams): BuildSendResult {
   const parsed = parseWalletSecret(params.secret);
