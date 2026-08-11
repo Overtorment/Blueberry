@@ -1,6 +1,7 @@
 import { Block } from "bitcoinjs-lib";
 import { buildUtxoMap, netDeltasForTxs } from "../parse/balance.ts";
 import { extractWatchTxs } from "../parse/extract.ts";
+import { requeueOrphanSpends } from "../parse/orphan-spends.ts";
 import { usedWatchIndexes } from "../parse/used-indexes.ts";
 import type { Wallet } from "../wallet/wallet.ts";
 import {
@@ -60,6 +61,12 @@ export function createParseBlocksModule(
 
   function kick() {
     wake?.();
+  }
+
+  /** Re-queue parsed blocks that still spend current UTXOs (missed spends). */
+  function repairOrphanSpends(): void {
+    const cleared = requeueOrphanSpends(ctx.db, wallet.scripts());
+    if (cleared > 0) needsRun = true;
   }
 
   function waitForKick(ms = idleDelayMs): Promise<void> {
@@ -213,6 +220,7 @@ export function createParseBlocksModule(
         status: "starting",
       });
       wallet.refresh();
+      repairOrphanSpends();
 
       unsubProgress = ctx.bus.on("blocks:progress", () => {
         if (stopped) return;
@@ -225,6 +233,7 @@ export function createParseBlocksModule(
       unsubIdle = ctx.bus.on("sync:idle", () => {
         if (stopped) return;
         allowed = true;
+        repairOrphanSpends();
         if (busy) {
           needsRun = true;
           return;

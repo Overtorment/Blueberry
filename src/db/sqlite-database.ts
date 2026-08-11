@@ -886,6 +886,22 @@ export function createSqliteDatabase(path: string): Database {
         block: row.block,
       }));
     },
+
+    findHeightsContainingOutpoint(txidDisplay, vout, afterHeight) {
+      const pattern = Buffer.alloc(36);
+      Buffer.from(txidDisplay, "hex").reverse().copy(pattern, 0);
+      pattern.writeUInt32LE(vout >>> 0, 32);
+      const rows = raw
+        .query(
+          `SELECT height AS height
+           FROM blocks
+           WHERE height > ?
+             AND instr(block, ?) > 0
+           ORDER BY height ASC`,
+        )
+        .all(afterHeight, pattern) as Array<{ height: number }>;
+      return rows.map((row) => row.height);
+    },
   };
 
   const insertParsedBlock = raw.query(
@@ -915,6 +931,10 @@ export function createSqliteDatabase(path: string): Database {
       raw
         .query("DELETE FROM parsed_blocks WHERE height >= ?")
         .run(fromHeight);
+    },
+
+    clear(height) {
+      raw.query("DELETE FROM parsed_blocks WHERE height = ?").run(height);
     },
   };
 
