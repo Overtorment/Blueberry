@@ -148,6 +148,51 @@ describe("TUI wallet txs wiring", () => {
     db.close();
   });
 
+  test("forwards sync state so ETA is active-only", () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    for (let height = 1; height <= 6; height++) {
+      db.blocks.insert({
+        height,
+        blockHashInternalHex: `${height}`.repeat(32).padEnd(64, "0"),
+        block: new Uint8Array([height]),
+      });
+    }
+
+    const store = createWalletTxsStore();
+    const tui = startTui(bus, db, store);
+
+    expect(store.get().blocksTotal).toBe(6);
+    expect(store.get().blocksParsed).toBe(0);
+    expect(store.get().etaMs).toBeNull();
+
+    bus.emit("sync:idle", { at: 1000 });
+    db.parsedBlocks.mark(1);
+    bus.emit("wallet:txs", { at: 1000 });
+    expect(store.get().etaMs).toBeNull();
+    db.parsedBlocks.mark(2);
+    bus.emit("wallet:txs", { at: 2000 });
+    expect(store.get().etaMs).toBe(4000);
+
+    bus.emit("sync:catchup", { at: 2000, reason: "blocks" });
+    expect(store.get().etaMs).toBeNull();
+
+    db.parsedBlocks.mark(3);
+    bus.emit("wallet:txs", { at: 1_000_000 });
+    expect(store.get().etaMs).toBeNull();
+
+    bus.emit("sync:idle", { at: 1_001_000 });
+    db.parsedBlocks.mark(4);
+    bus.emit("wallet:txs", { at: 1_001_000 });
+    expect(store.get().etaMs).toBeNull();
+    db.parsedBlocks.mark(5);
+    bus.emit("wallet:txs", { at: 1_002_000 });
+    expect(store.get().etaMs).toBe(1000);
+
+    tui.stop();
+    db.close();
+  });
+
   test("snapshotFromDb lists UTXOs newest-first when wallet is provided", () => {
     const db = createSqliteDatabase(":memory:");
     const wallet = createWallet(db, { secret: MNEMONIC, addressGap: 4 });

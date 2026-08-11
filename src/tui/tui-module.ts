@@ -119,6 +119,16 @@ export function createTuiModule(
           refreshWalletUi(p.at);
         }),
       );
+      unsubs.push(
+        ctx.bus.on("sync:idle", () => {
+          walletTxsStore.setParsingActive(true);
+        }),
+      );
+      unsubs.push(
+        ctx.bus.on("sync:catchup", () => {
+          walletTxsStore.setParsingActive(false);
+        }),
+      );
       if (broadcastStore) {
         unsubs.push(
           ctx.bus.on("broadcast:progress", (p) => {

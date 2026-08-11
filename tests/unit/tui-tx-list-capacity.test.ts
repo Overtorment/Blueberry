@@ -7,7 +7,7 @@ describe("txListCapacity", () => {
     expect(txListCapacity(24, 0)).toBe(5);
     // progress line reserves 1
     expect(txListCapacity(24, 1)).toBe(4);
-    // two reserved lines → one fewer than reservedLines=1
+    // progress + ETA lines reserve 2
     expect(txListCapacity(24, 2)).toBe(txListCapacity(24, 1) - 1);
   });
 
