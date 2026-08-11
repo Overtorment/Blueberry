@@ -45,7 +45,7 @@ export type WalletTxsSnapshot = {
   balanceBtcLabel: string;
   blocksParsed: number;
   blocksTotal: number;
-  /** ms until parse backlog clears; null if unknown or no backlog */
+  /** Retained for snapshot compatibility; always null (parse ETA removed). */
   etaMs: number | null;
   txs: WalletTxRow[];
   utxos: WalletUtxoRow[];
