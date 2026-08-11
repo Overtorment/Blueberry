@@ -2,7 +2,7 @@
 
 ## Goal
 
-Stop block parsing from competing with filter/block downloads for CPU on weak machines. Parse downloaded matched blocks only when catch-up is fully idle. Keep a simple `x/y` parse backlog line in the TUI; remove parse ETA.
+Stop block parsing from competing with filter/block downloads for CPU on weak machines. Parse downloaded matched blocks only when catch-up is fully idle. Always show the simple `x/y` parse backlog line; show parse ETA only while parsing is active.
 
 ## Decisions
 
@@ -10,6 +10,7 @@ Stop block parsing from competing with filter/block downloads for CPU on weak ma
 - Idle means filters are tip-complete and every matched block is downloaded (current `sync-idle` semantics). Parse backlog is intentionally not part of idle evaluation.
 - Gap growth that rematches filters returns the app to catch-up; parsing pauses until idle again.
 - Scope is `parse-blocks` only; filters-matching keeps running during catch-up.
+- Parse ETA sampling uses the same idle/catch-up events, resets on every transition, and never counts paused time.
 
 ## Behavior
 
@@ -23,7 +24,10 @@ Stop block parsing from competing with filter/block downloads for CPU on weak ma
 ## UI
 
 - Keep one status line when backlog exists: `x/y blocks parsed` (already in `Transactions`).
-- Remove the parse ETA line and stop computing parse ETA in `wallet-txs-store`.
+- While catch-up is active, show only `x/y blocks parsed`.
+- When `sync:idle` resumes parsing, start fresh ETA sampling. Show ETA after two advancing parse samples establish a rate.
+- On `sync:catchup`, clear and hide ETA immediately; paused time must not affect the next estimate.
+- `wallet-txs-store` owns the active flag, ETA samples, and estimate. The TUI module forwards `sync:idle` / `sync:catchup` through a dedicated store method.
 
 ## Non-goals
 
@@ -38,7 +42,9 @@ Stop block parsing from competing with filter/block downloads for CPU on weak ma
 - No parse while `sync:catchup` is active.
 - After `sync:idle`, pending downloaded blocks are parsed.
 - Mid-backlog `sync:catchup` pauses further parsing; a later `sync:idle` resumes.
-- Transactions UI shows `x/y` with backlog and does not show parse ETA.
+- While paused, Transactions shows `x/y` without ETA.
+- While parsing, ETA appears after two advancing samples.
+- Pausing clears ETA; resuming starts a fresh sample window that excludes paused time.
 
 ## Risks
 
