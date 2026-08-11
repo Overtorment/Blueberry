@@ -49,10 +49,13 @@ export function createParseBlocksModule(
   const onParseBatch = options.onParseBatch;
 
   let stopped = true;
+  let allowed = false;
   let busy = false;
   let needsRun = false;
   let wake: (() => void) | undefined;
   let unsubProgress: (() => void) | undefined;
+  let unsubIdle: (() => void) | undefined;
+  let unsubCatchup: (() => void) | undefined;
   let loopPromise: Promise<void> | undefined;
 
   function kick() {
@@ -156,6 +159,7 @@ export function createParseBlocksModule(
               : `height ${block.height}: ${String(err)}`,
         });
       }
+      if (!allowed) return;
       if (i + 1 < blocks.length) {
         if (blockGapMs > 0) await sleep(blockGapMs);
         else await yieldOnce();
@@ -171,6 +175,11 @@ export function createParseBlocksModule(
     while (!stopped) {
       busy = true;
       needsRun = false;
+      if (!allowed) {
+        busy = false;
+        await waitForKick();
+        continue;
+      }
       try {
         await parseBatch();
       } catch (err) {
@@ -203,14 +212,6 @@ export function createParseBlocksModule(
       });
       wallet.refresh();
 
-      busy = true;
-      needsRun = false;
-      try {
-        await parseBatch();
-      } finally {
-        busy = false;
-      }
-
       unsubProgress = ctx.bus.on("blocks:progress", () => {
         if (stopped) return;
         if (busy) {
@@ -218,6 +219,18 @@ export function createParseBlocksModule(
           return;
         }
         kick();
+      });
+      unsubIdle = ctx.bus.on("sync:idle", () => {
+        if (stopped) return;
+        allowed = true;
+        if (busy) {
+          needsRun = true;
+          return;
+        }
+        kick();
+      });
+      unsubCatchup = ctx.bus.on("sync:catchup", () => {
+        allowed = false;
       });
 
       ctx.bus.emit("module:status", {
@@ -234,8 +247,13 @@ export function createParseBlocksModule(
     async stop() {
       if (stopped) return;
       stopped = true;
+      allowed = false;
       unsubProgress?.();
       unsubProgress = undefined;
+      unsubIdle?.();
+      unsubIdle = undefined;
+      unsubCatchup?.();
+      unsubCatchup = undefined;
       kick();
       await loopPromise;
       loopPromise = undefined;
