@@ -292,6 +292,11 @@ function buildDraftTx(params: BuildSendTxParams): {
     }
 
     if (account.kind === "address") {
+      if (scriptType === "p2sh-p2wpkh") {
+        throw new Error(
+          "nested P2SH watch-only sends are unsupported because the redeem script is unknown",
+        );
+      }
       if (scriptType === "p2pkh" && !u.nonWitnessUtxo) {
         throw new Error(
           "legacy p2pkh input requires nonWitnessUtxo (previous transaction)",
@@ -333,6 +338,8 @@ function buildDraftTx(params: BuildSendTxParams): {
     };
   });
 
+  // An address exposes only taproot's tweaked output key, not its internal key.
+  // This temporary key is for scure weight estimation and is stripped before toPSBT.
   const taprootAddressInput =
     account.kind === "address" &&
     params.utxos.some(

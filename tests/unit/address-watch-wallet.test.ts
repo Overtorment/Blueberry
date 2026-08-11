@@ -146,6 +146,61 @@ describe("address wallet receive + gaps", () => {
 });
 
 describe("buildSend address watch-only", () => {
+  test("rejects nested P2SH sends because the redeem script is unknown", () => {
+    const wallet = deriveWatchWallet(ADDR_P2SH);
+    expect(() =>
+      buildSend({
+        secret: ADDR_P2SH,
+        wallet,
+        utxos: [
+          {
+            txid: "44".repeat(32),
+            vout: 0,
+            valueSats: 100_000n,
+            scriptPubKey: wallet.scripts[0]!,
+          },
+        ],
+        toAddress: DEST,
+        amountSats: 50_000n,
+        feeRateSatPerVb: 1,
+        changeAddress: ADDR_P2SH,
+      }),
+    ).toThrow(
+      "nested P2SH watch-only sends are unsupported because the redeem script is unknown",
+    );
+  });
+
+  test("legacy address PSBT builds when nonWitnessUtxo is attached", () => {
+    const wallet = deriveWatchWallet(ADDR_LEGACY);
+    const fund = new Transaction();
+    fund.version = 2;
+    fund.addInput(Buffer.alloc(32), 0xffffffff);
+    fund.addOutput(wallet.scripts[0]!, 100_000n);
+
+    const result = buildSend({
+      secret: ADDR_LEGACY,
+      wallet,
+      utxos: [
+        {
+          txid: fund.getId(),
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: wallet.scripts[0]!,
+          nonWitnessUtxo: new Uint8Array(fund.toBuffer()),
+        },
+      ],
+      toAddress: DEST,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: ADDR_LEGACY,
+    });
+
+    expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    const tx = ScureTransaction.fromPSBT(hex.decode(result.psbtHex));
+    expect(tx.getInput(0).nonWitnessUtxo).toBeDefined();
+  });
+
   test("returns unsigned PSBT; overrides mismatched change address; refuses signed builder", () => {
     const wallet = deriveWatchWallet(ADDR_BECH32);
     const utxo = {
