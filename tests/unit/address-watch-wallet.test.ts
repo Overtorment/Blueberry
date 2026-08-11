@@ -146,7 +146,7 @@ describe("address wallet receive + gaps", () => {
 });
 
 describe("buildSend address watch-only", () => {
-  test("returns unsigned PSBT; change to same address; refuses signed builder", () => {
+  test("returns unsigned PSBT; overrides mismatched change address; refuses signed builder", () => {
     const wallet = deriveWatchWallet(ADDR_BECH32);
     const utxo = {
       txid: "11".repeat(32),
@@ -161,7 +161,7 @@ describe("buildSend address watch-only", () => {
       toAddress: DEST,
       amountSats: 50_000n,
       feeRateSatPerVb: 1,
-      changeAddress: ADDR_BECH32,
+      changeAddress: ADDR_TAPROOT,
     });
     expect(result.kind).toBe("psbt");
     if (result.kind !== "psbt") throw new Error("unreachable");
@@ -174,6 +174,7 @@ describe("buildSend address watch-only", () => {
     const outAddrs = [tx.getOutputAddress(0), tx.getOutputAddress(1)];
     expect(outAddrs).toContain(DEST);
     expect(outAddrs).toContain(ADDR_BECH32);
+    expect(outAddrs).not.toContain(ADDR_TAPROOT);
 
     expect(() =>
       buildSignedSendTx({
@@ -214,7 +215,7 @@ describe("buildSend address watch-only", () => {
     expect(tx.getOutputAddress(0)).toBe(DEST);
   });
 
-  test("taproot address builds PSBT using p2tr from address key", () => {
+  test("taproot address PSBT keeps the watched output script without key metadata", () => {
     const wallet = deriveWatchWallet(ADDR_TAPROOT);
     const result = buildSend({
       secret: ADDR_TAPROOT,
@@ -233,5 +234,10 @@ describe("buildSend address watch-only", () => {
       changeAddress: ADDR_TAPROOT,
     });
     expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    const tx = ScureTransaction.fromPSBT(hex.decode(result.psbtHex));
+    const input = tx.getInput(0);
+    expect(input.witnessUtxo?.script).toEqual(wallet.scripts[0]!);
+    expect(input.tapInternalKey).toBeUndefined();
   });
 });

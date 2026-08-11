@@ -2,7 +2,6 @@ import { hex } from "@scure/base";
 import { HDKey } from "@scure/bip32";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import { secp256k1 } from "@noble/curves/secp256k1";
-import { address as btcAddress } from "bitcoinjs-lib";
 import {
   bip32Path,
   p2pkh,
@@ -10,7 +9,7 @@ import {
   p2tr,
   p2wpkh,
   selectUTXO,
-  type Transaction,
+  Transaction,
 } from "@scure/btc-signer";
 import { scriptHex } from "../parse/extract.ts";
 import {
@@ -298,19 +297,6 @@ function buildDraftTx(params: BuildSendTxParams): {
           "legacy p2pkh input requires nonWitnessUtxo (previous transaction)",
         );
       }
-      if (scriptType === "p2tr") {
-        const decoded = btcAddress.fromBech32(addr.address);
-        const spend = p2tr(decoded.data);
-        return {
-          ...spend,
-          txid: hex.decode(u.txid),
-          index: u.vout,
-          witnessUtxo: {
-            script: u.scriptPubKey,
-            amount: u.valueSats,
-          },
-        };
-      }
       return {
         txid: hex.decode(u.txid),
         index: u.vout,
@@ -347,7 +333,34 @@ function buildDraftTx(params: BuildSendTxParams): {
     };
   });
 
-  const { tx, feeSats, vsize } = selectSendTx(inputs, params);
+  const taprootAddressInput =
+    account.kind === "address" &&
+    params.utxos.some(
+      (u) =>
+        scriptTypeOf(addressForScript(params.wallet, u.scriptPubKey)) === "p2tr",
+    );
+  const selectionInputs = taprootAddressInput
+    ? inputs.map((input, index) => {
+        const script = params.utxos[index]!.scriptPubKey;
+        return scriptTypeOf(addressForScript(params.wallet, script)) === "p2tr"
+          ? { ...input, tapInternalKey: script.slice(2) }
+          : input;
+      })
+    : inputs;
+  const selected = selectSendTx(selectionInputs, params);
+  let tx = selected.tx;
+  if (taprootAddressInput) {
+    tx = new Transaction();
+    for (let i = 0; i < selected.tx.inputsLength; i++) {
+      const { tapInternalKey: _estimationOnly, ...input } =
+        selected.tx.getInput(i);
+      tx.addInput(input);
+    }
+    for (let i = 0; i < selected.tx.outputsLength; i++) {
+      tx.addOutput(selected.tx.getOutput(i));
+    }
+  }
+  const { feeSats, vsize } = selected;
   return { tx, signPaths, account, feeSats, vsize };
 }
 
@@ -405,6 +418,14 @@ export function buildSend(params: BuildSendTxParams): BuildSendResult {
   const parsed = parseWalletSecret(params.secret);
   if (parsed.kind === "mnemonic" || parsed.kind === "wif") {
     return buildSignedSendTx(params);
+  }
+  if (parsed.kind === "address" && params.amountSats !== "max") {
+    const watched = params.wallet.addresses[0];
+    if (!watched) throw new Error("address wallet missing watched address");
+    return buildUnsignedSendPsbt({
+      ...params,
+      changeAddress: watched.address,
+    });
   }
   return buildUnsignedSendPsbt(params);
 }
