@@ -13,6 +13,7 @@ import {
   utxoValueBar,
 } from "../parse/format.ts";
 import type { Wallet } from "../wallet/wallet.ts";
+import { estimateEtaMs, nextProgressSamples } from "./progress-eta.ts";
 
 export type WalletTxRow = {
   txid: string;
@@ -45,7 +46,7 @@ export type WalletTxsSnapshot = {
   balanceBtcLabel: string;
   blocksParsed: number;
   blocksTotal: number;
-  /** Retained for snapshot compatibility; always null (parse ETA removed). */
+  /** ms until parse backlog clears; null if unknown, inactive, or no backlog */
   etaMs: number | null;
   txs: WalletTxRow[];
   utxos: WalletUtxoRow[];
@@ -54,6 +55,7 @@ export type WalletTxsSnapshot = {
 export type WalletTxsStore = {
   get(): WalletTxsSnapshot;
   apply(snapshot: WalletTxsSnapshot): void;
+  setParsingActive(active: boolean): void;
   subscribe(listener: () => void): () => void;
 };
 
@@ -165,15 +167,56 @@ export function snapshotFromDb(
 
 export function createWalletTxsStore(): WalletTxsStore {
   let snapshot = emptyWalletTxsSnapshot;
+  let parsingActive = false;
+  let samples: { at: number; downloaded: number }[] = [];
   const listeners = new Set<() => void>();
+
+  function notify(): void {
+    for (const listener of [...listeners]) listener();
+  }
 
   return {
     get() {
       return snapshot;
     },
+    setParsingActive(active: boolean) {
+      if (parsingActive === active) return;
+      parsingActive = active;
+      samples = [];
+      if (!active && snapshot.etaMs !== null) {
+        snapshot = { ...snapshot, etaMs: null };
+        notify();
+      }
+    },
     apply(next) {
-      snapshot = { ...next, etaMs: null };
-      for (const listener of [...listeners]) listener();
+      if (!parsingActive) {
+        samples = [];
+        snapshot = { ...next, etaMs: null };
+        notify();
+        return;
+      }
+
+      const prev = {
+        downloaded: snapshot.blocksParsed,
+        total: snapshot.blocksTotal,
+      };
+      if (next.at === null) {
+        samples = [];
+        snapshot = { ...next, etaMs: null };
+      } else {
+        const nextSamples = nextProgressSamples(samples, prev, {
+          at: next.at,
+          downloaded: next.blocksParsed,
+          total: next.blocksTotal,
+        });
+        const hasBacklog = next.blocksTotal > next.blocksParsed;
+        const nextEta = hasBacklog
+          ? estimateEtaMs(nextSamples, next.blocksTotal)
+          : null;
+        samples = nextSamples;
+        snapshot = { ...next, etaMs: nextEta };
+      }
+      notify();
     },
     subscribe(listener) {
       listeners.add(listener);
