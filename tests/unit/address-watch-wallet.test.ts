@@ -2,11 +2,19 @@
  * Single-address watch-only — vectors reuse BlueWallet WIF primary addresses
  * and BIP-341 taproot example from is-address-valid tests.
  */
-import { address as btcAddress } from "bitcoinjs-lib";
+import { address as btcAddress, Transaction } from "bitcoinjs-lib";
 import { bytesToHex } from "bip158";
 import { describe, expect, test } from "bun:test";
+import { createMessageBus } from "../../src/bus/message-bus.ts";
+import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
+import { createParseBlocksModule } from "../../src/modules/parse-blocks.ts";
+import { createReceiveAddressStore } from "../../src/tui/receive-address-store.ts";
 import { deriveWatchWallet } from "../../src/wallet/derive.ts";
-import { parseWalletSecret } from "../../src/wallet/secret.ts";
+import {
+  parseWalletSecret,
+  saveWalletSecret,
+} from "../../src/wallet/secret.ts";
+import { createWallet } from "../../src/wallet/wallet.ts";
 
 const ADDR_BECH32 = "bc1q3rl0mkyk0zrtxfmqn9wpcd3gnaz00yv9yp0hxe";
 const ADDR_LEGACY = "14YZ6iymQtBVQJk6gKnLCk49UScJK7SH4M";
@@ -80,5 +88,52 @@ describe("deriveWatchWallet address", () => {
     expect(a.addresses).toHaveLength(1);
     expect(b.addresses).toHaveLength(1);
     expect(bytesToHex(a.scripts[0]!)).toBe(bytesToHex(b.scripts[0]!));
+  });
+});
+
+describe("address wallet receive + gaps", () => {
+  test("receive store returns the sole watched address", () => {
+    const db = createSqliteDatabase(":memory:");
+    saveWalletSecret(db, ADDR_BECH32);
+    const wallet = createWallet(db);
+    const store = createReceiveAddressStore();
+
+    store.refresh(db, wallet);
+
+    expect(wallet.snapshot().kind).toBe("address");
+    expect(store.get().address).toBe(ADDR_BECH32);
+    db.close();
+  });
+
+  test("parse-blocks does not grow gaps for address wallets", async () => {
+    const db = createSqliteDatabase(":memory:");
+    saveWalletSecret(db, ADDR_BECH32);
+    const bus = createMessageBus();
+    const wallet = createWallet(db, { addressGap: 1 });
+    const script = wallet.snapshot().scripts[0]!;
+    const tx = new Transaction();
+    tx.addInput(Buffer.alloc(32), 0xffffffff);
+    tx.addOutput(script, 1_000n);
+    db.transactions.upsert({
+      txid: tx.getId(),
+      height: 1,
+      txIndex: 0,
+      blockHashInternalHex: "11".repeat(32),
+      tx: tx.toBuffer(),
+      netDeltaSats: 1_000,
+    });
+    const before = wallet.gaps();
+    const mod = createParseBlocksModule(
+      { bus, db },
+      { wallet, idleDelayMs: 50, blockGapMs: 0 },
+    );
+
+    await mod.start();
+
+    expect(wallet.snapshot().kind).toBe("address");
+    expect(wallet.scripts()).toHaveLength(1);
+    expect(wallet.gaps()).toEqual(before);
+    await mod.stop();
+    db.close();
   });
 });

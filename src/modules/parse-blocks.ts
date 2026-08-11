@@ -95,8 +95,8 @@ export function createParseBlocksModule(
 
   function maybeGrowWatch(): void {
     const snap = wallet.snapshot();
-    // Single-key WIF watches a fixed set of 4 scripts — never grow HD gaps.
-    if (snap.kind === "wif") return;
+    // Fixed watch sets (WIF four scripts / single address) never grow HD gaps.
+    if (snap.kind === "wif" || snap.kind === "address") return;
     const used = usedWatchIndexes(ctx.db.transactions.list(), snap);
     const result = growWatchGapsIfNeeded(loadWatchGaps(ctx.db), used);
     if (!result.grew) return;
