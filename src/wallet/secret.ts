@@ -2,6 +2,7 @@ import { HDKey } from "@scure/bip32";
 import { validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 import { WIF } from "@scure/btc-signer";
+import { isAddressValid } from "./is-address-valid.ts";
 
 /** SLIP-0132 mainnet BIP84 (zpub/zprv). */
 export const BIP84_ZPUB_VERSIONS = {
@@ -16,7 +17,7 @@ const ACCOUNT_DEPTH = 3;
 
 const wifCodec = WIF();
 
-export type WalletSecretKind = "mnemonic" | "zpub" | "wif";
+export type WalletSecretKind = "mnemonic" | "zpub" | "wif" | "address";
 
 export type ParsedWalletSecret = {
   kind: WalletSecretKind;
@@ -87,6 +88,10 @@ export function parseWalletSecret(raw: string): ParsedWalletSecret {
   if (looksLikeWifCandidate(value)) {
     decodeWifPrivateKey(value);
     return { kind: "wif", value };
+  }
+
+  if (isAddressValid(value)) {
+    return { kind: "address", value };
   }
 
   if (!validateMnemonic(value, wordlist)) {
