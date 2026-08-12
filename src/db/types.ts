@@ -153,6 +153,8 @@ export type DownloadedBlock = {
 export interface MatchedBlocksRepository {
   /** Insert if missing; returns true when a new row was written. */
   insert(block: MatchedBlock): boolean;
+  /** Current match at height, or null if none. */
+  get(height: number): MatchedBlock | null;
   count(): number;
   /** Matched heights with no row in `blocks`, lowest height first. */
   listNeedingDownload(limit: number): MatchedBlock[];

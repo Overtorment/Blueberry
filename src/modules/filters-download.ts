@@ -335,10 +335,11 @@ export function createFiltersDownloadModule(
             }
             const stopRow = ctx.db.headers.get(claim.to);
             if (!stopRow) throw new Error("missing stop header");
+            const stopHashInternalHex = stopRow.hashInternalHex;
 
             const response = await session.getCFHeaders(
               claim.from,
-              hexToBytes(stopRow.hashInternalHex),
+              hexToBytes(stopHashInternalHex),
             );
             const derived = verifyCfHeadersBatch(
               chainFrom,
@@ -349,6 +350,15 @@ export function createFiltersDownloadModule(
               checkpointCache.map,
             );
             if (!derived) throw new Error("cfheaders verification failed");
+
+            // Reorg may have replaced the stop hash while getCFHeaders was in flight.
+            const stopNow = ctx.db.headers.get(claim.to);
+            if (
+              !stopNow ||
+              stopNow.hashInternalHex !== stopHashInternalHex
+            ) {
+              throw new Error("stale cfheaders stop hash after reorg");
+            }
 
             const rows: Array<{ height: number; header: Uint8Array }> = [];
             if (claim.from === chainFrom && chainFrom > 0) {
@@ -432,9 +442,22 @@ export function createFiltersDownloadModule(
     const flushVerified = () => {
       if (toStore.length === 0) return;
       const rows = toStore.splice(0);
-      ctx.db.filters.append(rows);
-      saved += rows.length;
-      haveCached += rows.length;
+      // Reorg may have replaced headers while getCFilters was in flight;
+      // keep only rows whose block hash is still canonical.
+      const canonical = rows.filter(
+        (row) =>
+          ctx.db.headers.get(row.height)?.hashInternalHex ===
+          row.blockHashInternalHex,
+      );
+      if (canonical.length < rows.length) {
+        diagnosticLog(
+          `filter flush dropped stale range=${range.from}-${range.to} dropped=${rows.length - canonical.length}`,
+        );
+      }
+      if (canonical.length === 0) return;
+      ctx.db.filters.append(canonical);
+      saved += canonical.length;
+      haveCached += canonical.length;
       emitProgress(chainFrom, tipTo, false);
     };
 

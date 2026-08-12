@@ -3,6 +3,7 @@ import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
 import { resolveOnboardingGate } from "./boot/onboarding-gate.ts";
 import { reexecSelf } from "./boot/reexec.ts";
+import { installFatalUnhandledRejection } from "./boot/unhandled-rejection.ts";
 import { consensusForYear } from "./checkpoint.ts";
 import { createMessageBus } from "./bus/message-bus.ts";
 import { createSqliteDatabase } from "./db/sqlite-database.ts";
@@ -61,8 +62,9 @@ mkdirSync("./blueberry.data", { recursive: true });
 initFileLog("./blueberry.data/blueberry.log");
 log("main", "boot");
 
-process.on("unhandledRejection", (reason) => {
-  logError("main", "unhandledRejection", reason);
+installFatalUnhandledRejection({
+  onRejection: (reason) => logError("main", "unhandledRejection", reason),
+  exit: (code) => process.reallyExit(code),
 });
 
 try {

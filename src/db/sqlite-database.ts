@@ -790,6 +790,23 @@ export function createSqliteDatabase(path: string): Database {
       return result.changes > 0;
     },
 
+    get(height) {
+      const row = raw
+        .query(
+          `SELECT height, block_hash_internal_hex
+           FROM matched_blocks WHERE height = ?`,
+        )
+        .get(height) as {
+        height: bigint | number;
+        block_hash_internal_hex: string;
+      } | null;
+      if (!row) return null;
+      return {
+        height: asInt(row.height),
+        blockHashInternalHex: row.block_hash_internal_hex,
+      };
+    },
+
     count() {
       const row = raw
         .query("SELECT COUNT(*) AS n FROM matched_blocks")

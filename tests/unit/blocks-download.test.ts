@@ -443,6 +443,56 @@ describe("blocks-download", () => {
     db.close();
   });
 
+  test("discards in-flight block after reorg replaces the match hash", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const orphan = makeVariantBlock(1);
+    const orphanHex = internalHashHex(orphan);
+    const replacement = makeVariantBlock(2);
+    const replacementHex = internalHashHex(replacement);
+
+    db.matchedBlocks.insert({
+      height: 10,
+      blockHashInternalHex: orphanHex,
+    });
+    seedPeer(db, "1.1.1.1");
+    seedPeer(db, "2.2.2.2");
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const mod = createBlocksDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        openSession: makeOpenSession(new Map([[orphanHex, orphan]]), {
+          beforeGetBlock: async () => {
+            await held;
+          },
+        }),
+        concurrency: 1,
+      },
+    );
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 40));
+
+    db.rewindAfter(9);
+    db.matchedBlocks.insert({
+      height: 10,
+      blockHashInternalHex: replacementHex,
+    });
+    release();
+    await new Promise((r) => setTimeout(r, 80));
+
+    expect(db.blocks.has(10)).toBe(false);
+    expect(db.blocks.count()).toBe(0);
+
+    await mod.stop();
+    db.close();
+  });
+
   test("hash mismatch: nothing persisted, peer not marked used", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
