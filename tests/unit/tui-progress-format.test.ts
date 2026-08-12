@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { formatEta, progressBar } from "../../src/tui/progress-format.ts";
+import {
+  formatEta,
+  formatParseProgress,
+  progressBar,
+} from "../../src/tui/progress-format.ts";
 
 describe("formatEta", () => {
   test("null unknown, non-positive done, seconds and minutes", () => {
@@ -8,6 +12,17 @@ describe("formatEta", () => {
     expect(formatEta(-1)).toBe("done");
     expect(formatEta(1500)).toBe("2s");
     expect(formatEta(65_000)).toBe("1m 5s");
+  });
+});
+
+describe("formatParseProgress", () => {
+  test("keeps ETA on the parse progress row only when available", () => {
+    expect(formatParseProgress(332, 500, null)).toBe(
+      "332/500 blocks parsed",
+    );
+    expect(formatParseProgress(332, 500, 65_000)).toBe(
+      "332/500 blocks parsed (ETA 1m 5s)",
+    );
   });
 });
 

@@ -1,5 +1,6 @@
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { address as btcAddress } from "bitcoinjs-lib";
+import type { AddressScriptType } from "./types.ts";
 
 /**
  * Mainnet address check — same rules as BlueWallet `LegacyWallet.isAddressValid`:
@@ -39,4 +40,32 @@ export function isAddressValid(address: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Classify address forms supported as fixed single-address watches.
+ * Destination validation is broader (for example P2WSH), but watched
+ * addresses need a known input shape for PSBT fee estimation.
+ */
+export function watchAddressScriptType(address: string): AddressScriptType {
+  const value = address.trim();
+  if (!isAddressValid(value)) throw new Error("invalid mainnet address");
+
+  if (value.toLowerCase().startsWith("bc1")) {
+    const decoded = btcAddress.fromBech32(value);
+    if (decoded.version === 0) {
+      if (decoded.data.length === 20) return "p2wpkh";
+      if (decoded.data.length === 32) {
+        throw new Error("P2WSH watch addresses are unsupported");
+      }
+      throw new Error("unsupported witness v0 address");
+    }
+    if (decoded.version === 1 && decoded.data.length === 32) return "p2tr";
+    throw new Error("unsupported witness address");
+  }
+
+  const { version } = btcAddress.fromBase58Check(value);
+  if (version === 0x00) return "p2pkh";
+  if (version === 0x05) return "p2sh-p2wpkh";
+  throw new Error("unsupported mainnet address version");
 }

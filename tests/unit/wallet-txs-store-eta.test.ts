@@ -15,45 +15,36 @@ function snap(
   };
 }
 
-describe("wallet txs store ETA", () => {
-  test("empty snapshot has null eta; <2 advancing samples stay null", () => {
-    expect(emptyWalletTxsSnapshot.etaMs).toBeNull();
-
-    const store = createWalletTxsStore();
-    expect(store.get().etaMs).toBeNull();
-
-    store.apply(snap({ at: 1000, blocksParsed: 100, blocksTotal: 1000 }));
-    expect(store.get().etaMs).toBeNull();
-
-    // same parsed count: update time but no advancing sample pair
-    store.apply(snap({ at: 1500, blocksParsed: 100, blocksTotal: 1000 }));
-    expect(store.get().etaMs).toBeNull();
-    expect(store.get().at).toBe(1500);
-  });
-
-  test("advancing parse with backlog yields ETA; done clears eta", () => {
+describe("wallet txs store active parse ETA", () => {
+  test("estimates only while parsing is active", () => {
     const store = createWalletTxsStore();
     store.apply(snap({ at: 1000, blocksParsed: 100, blocksTotal: 1000 }));
     store.apply(snap({ at: 2000, blocksParsed: 200, blocksTotal: 1000 }));
-    // 100 blocks / 1000ms → 0.1 b/ms; remaining 800 → 8000ms
-    expect(store.get().etaMs).toBe(8000);
-
-    store.apply(snap({ at: 3000, blocksParsed: 1000, blocksTotal: 1000 }));
     expect(store.get().etaMs).toBeNull();
+
+    store.setParsingActive(true);
+    store.apply(snap({ at: 3000, blocksParsed: 300, blocksTotal: 1000 }));
+    expect(store.get().etaMs).toBeNull();
+    store.apply(snap({ at: 4000, blocksParsed: 400, blocksTotal: 1000 }));
+    expect(store.get().etaMs).toBe(6000);
   });
 
-  test("ETA ignores completion→idle dead time when work resumes", () => {
+  test("pause clears ETA; resume excludes paused time", () => {
     const store = createWalletTxsStore();
-    store.apply(snap({ at: 1000, blocksParsed: 500, blocksTotal: 1000 }));
-    store.apply(snap({ at: 2000, blocksParsed: 1000, blocksTotal: 1000 }));
+    store.setParsingActive(true);
+    store.apply(snap({ at: 1000, blocksParsed: 100, blocksTotal: 1000 }));
+    store.apply(snap({ at: 2000, blocksParsed: 200, blocksTotal: 1000 }));
+    expect(store.get().etaMs).toBe(8000);
+
+    store.setParsingActive(false);
+    expect(store.get().etaMs).toBeNull();
+    store.apply(snap({ at: 1_000_000, blocksParsed: 300, blocksTotal: 1000 }));
     expect(store.get().etaMs).toBeNull();
 
-    // More blocks appear after a long idle; backlog returns.
-    store.apply(snap({ at: 1_000_000, blocksParsed: 1000, blocksTotal: 5000 }));
+    store.setParsingActive(true);
+    store.apply(snap({ at: 1_001_000, blocksParsed: 400, blocksTotal: 1000 }));
     expect(store.get().etaMs).toBeNull();
-
-    // Fresh rate from resume only — not from the ancient completion sample.
-    store.apply(snap({ at: 1_001_000, blocksParsed: 1100, blocksTotal: 5000 }));
-    expect(store.get().etaMs).toBe(39_000);
+    store.apply(snap({ at: 1_002_000, blocksParsed: 500, blocksTotal: 1000 }));
+    expect(store.get().etaMs).toBe(5000);
   });
 });

@@ -127,13 +127,18 @@ describe("blocks-download", () => {
       events.push({ downloaded: p.downloaded, matched: p.matched });
     });
 
+    const logs: string[] = [];
+    const options: BlocksDownloadOptions & {
+      log: (message: string) => void;
+    } = {
+      net: stubPlatformNet(),
+      openSession: makeOpenSession(new Map([[internalHex, block]])),
+      concurrency: 2,
+      log: (message) => logs.push(message),
+    };
     const mod = createBlocksDownloadModule(
       { bus, db },
-      {
-        net: stubPlatformNet(),
-        openSession: makeOpenSession(new Map([[internalHex, block]])),
-        concurrency: 2,
-      },
+      options,
     );
     await mod.start();
     expect(events[0]).toEqual({ downloaded: 0, matched: 1 });
@@ -148,8 +153,25 @@ describe("blocks-download", () => {
     expect(events.some((e) => e.downloaded === 1 && e.matched === 1)).toBe(
       true,
     );
+    expect(
+      logs.some(
+        (line) =>
+          line ===
+          "module start concurrency=2 connectTimeoutMs=3000 syncTimeoutMs=30000",
+      ),
+    ).toBe(true);
+    expect(logs).toContain("block start attempt=1 peer=1.1.1.1:8333");
+    expect(
+      logs.some((line) =>
+        /^block success attempt=1 peer=1\.1\.1\.1:8333 bytes=\d+ elapsedMs=\d+$/.test(
+          line,
+        ),
+      ),
+    ).toBe(true);
+    expect(logs.every((line) => !line.includes("height="))).toBe(true);
 
     await mod.stop();
+    expect(logs).toContain("module stopped");
     db.close();
   });
 
@@ -379,6 +401,7 @@ describe("blocks-download", () => {
     });
 
     let allow = false;
+    const logs: string[] = [];
     const mod = createBlocksDownloadModule(
       { bus, db },
       {
@@ -392,11 +415,28 @@ describe("blocks-download", () => {
           );
         },
         concurrency: 1,
+        log: (message) => logs.push(message),
       },
     );
     await mod.start();
+    await waitFor(() =>
+      logs.includes(
+        "queue stalled pending=1 inFlight=0 leasedPeers=0 coolingPeers=0",
+      ),
+    );
     seedPeer(db, "1.1.1.1");
     // Intentionally do NOT emit peers:updated / filters:match.
+    expect(
+      await waitFor(
+        () =>
+          logs.some((line) =>
+            /^session open failure attempt=1 peer=1\.1\.1\.1:8333 elapsedMs=\d+ cooldownMs=3000 error=not yet$/.test(
+              line,
+            ),
+          ),
+        2000,
+      ),
+    ).toBeUndefined();
     allow = true;
     await waitFor(() => db.blocks.count() === 1, 5000);
     await mod.stop();
@@ -416,6 +456,7 @@ describe("blocks-download", () => {
     seedPeer(db, "1.1.1.1");
 
     let attempts = 0;
+    const logs: string[] = [];
     const mod = createBlocksDownloadModule(
       { bus, db },
       {
@@ -427,13 +468,28 @@ describe("blocks-download", () => {
           },
         }),
         concurrency: 1,
+        log: (message) => logs.push(message),
       },
     );
     await mod.start();
     await waitFor(() => attempts >= 1);
+    await waitFor(() =>
+      logs.some((line) =>
+        /^block failure attempt=1 peer=1\.1\.1\.1:8333 phase=validate elapsedMs=\d+ cooldownMs=3000 error=/.test(
+          line,
+        ),
+      ),
+    );
 
     expect(db.blocks.count()).toBe(0);
     expect(db.peers.list()[0]!.usedForBlocks).toBe(false);
+    expect(
+      logs.some((line) =>
+        /^block failure attempt=1 peer=1\.1\.1\.1:8333 phase=validate elapsedMs=\d+ cooldownMs=3000 error=/.test(
+          line,
+        ),
+      ),
+    ).toBe(true);
 
     await mod.stop();
     db.close();

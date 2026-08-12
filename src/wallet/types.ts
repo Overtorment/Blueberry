@@ -5,7 +5,7 @@ export type AddressScriptType =
   | "p2wpkh"
   | "p2tr";
 
-export type WatchWalletKind = "bip84" | "wif";
+export type WatchWalletKind = "bip84" | "wif" | "address";
 
 export type WatchAddress = {
   path: string;
@@ -15,8 +15,8 @@ export type WatchAddress = {
   address: string;
   scriptPubKey: Uint8Array;
   /**
-   * Always set for WIF watches. BIP84 HD watches are `p2wpkh` (may be omitted
-   * for backward compatibility; treat missing as p2wpkh).
+   * Always set for WIF and address watches. BIP84 HD watches are `p2wpkh`
+   * (may be omitted for backward compatibility; treat missing as p2wpkh).
    */
   scriptType?: AddressScriptType;
 };

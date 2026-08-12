@@ -30,6 +30,9 @@ function snapshotReceiveAddress(
     const addr = preferredWifReceiveAddress(watch, db.transactions.list());
     return { address: addr.address };
   }
+  if (watch.kind === "address") {
+    return { address: watch.addresses[0]?.address ?? null };
+  }
   const used = usedWatchIndexes(
     db.transactions.list().map((t) => ({ tx: t.tx })),
     watch,

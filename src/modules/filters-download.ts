@@ -10,6 +10,7 @@ import {
   verifyCFilterAgainstHeader,
 } from "bip157";
 import { config } from "../config.ts";
+import { log as writeLog } from "../log.ts";
 import { createFilterSessionPool } from "../net/filter-session-pool.ts";
 import { inspectWalletBirthday } from "../wallet/birthday.ts";
 import {
@@ -17,6 +18,7 @@ import {
   type FilterSessionApi,
 } from "../net/filter-sync.ts";
 import type { PlatformNet } from "../net/types.ts";
+import { formatError } from "../net/format-error.ts";
 import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
@@ -28,12 +30,16 @@ export type FiltersDownloadOptions = {
   concurrency?: number;
   filterBatchSize?: number;
   headerBatchSize?: number;
+  /** Verified filters committed per SQLite transaction. */
+  persistBatchSize?: number;
   idleDelayMs?: number;
   /** Session cool-down after failure (ms). */
   coolMs?: number;
   now?: () => number;
   /** Test seam: called when a download run starts. */
   onDownloadRun?: () => void;
+  /** Test seam: receives diagnostic messages without timestamps or scope. */
+  log?: (message: string) => void;
 };
 
 type PeerRef = { host: string; port: number };
@@ -72,8 +78,15 @@ export function createFiltersDownloadModule(
     options.filterBatchSize ?? config.filterBatchSize,
     MAX_GETCFILTERS_RANGE,
   );
+  const persistBatchSize = Math.max(
+    1,
+    Math.floor(options.persistBatchSize ?? 25),
+  );
   const idleDelayMs = options.idleDelayMs ?? 250;
   const now = options.now ?? Date.now;
+  const diagnosticLog =
+    options.log ?? ((message: string) => writeLog("filters-download", message));
+  let runSequence = 0;
 
   const pool = createFilterSessionPool({
     connect: options.net.connect,
@@ -86,6 +99,7 @@ export function createFiltersDownloadModule(
     onOpenCount: (open) => {
       ctx.bus.emit("peers:sockets", { at: now(), kind: "filt", open });
     },
+    onDiagnostic: diagnosticLog,
   });
 
   let stopped = true;
@@ -301,55 +315,66 @@ export function createFiltersDownloadModule(
       let ok = false;
       try {
         const leased = await pool.withSession(async (session, peer) => {
+          const startedAt = now();
           if (ctx.db.filterHeaders.get(claim.from)) {
             ok = true;
             return;
           }
-          if (
-            !checkpointCache ||
-            checkpointCache.tipHashInternalHex !== tipHashInternalHex
-          ) {
-            const cpHeaders = await session.getCFCheckpt(
-              hexToBytes(tipHashInternalHex),
+          try {
+            if (
+              !checkpointCache ||
+              checkpointCache.tipHashInternalHex !== tipHashInternalHex
+            ) {
+              const cpHeaders = await session.getCFCheckpt(
+                hexToBytes(tipHashInternalHex),
+              );
+              checkpointCache = {
+                tipHashInternalHex,
+                map: checkpointMap(cpHeaders),
+              };
+            }
+            const stopRow = ctx.db.headers.get(claim.to);
+            if (!stopRow) throw new Error("missing stop header");
+
+            const response = await session.getCFHeaders(
+              claim.from,
+              hexToBytes(stopRow.hashInternalHex),
             );
-            checkpointCache = {
-              tipHashInternalHex,
-              map: checkpointMap(cpHeaders),
-            };
-          }
-          const stopRow = ctx.db.headers.get(claim.to);
-          if (!stopRow) throw new Error("missing stop header");
+            const derived = verifyCfHeadersBatch(
+              chainFrom,
+              claim.from,
+              claim.to,
+              response.previousFilterHeader,
+              response.filterHashes,
+              checkpointCache.map,
+            );
+            if (!derived) throw new Error("cfheaders verification failed");
 
-          const response = await session.getCFHeaders(
-            claim.from,
-            hexToBytes(stopRow.hashInternalHex),
-          );
-          const derived = verifyCfHeadersBatch(
-            chainFrom,
-            claim.from,
-            claim.to,
-            response.previousFilterHeader,
-            response.filterHashes,
-            checkpointCache.map,
-          );
-          if (!derived) throw new Error("cfheaders verification failed");
-
-          const rows: Array<{ height: number; header: Uint8Array }> = [];
-          if (claim.from === chainFrom && chainFrom > 0) {
-            rows.push({
-              height: chainFrom - 1,
-              header: response.previousFilterHeader.slice(),
-            });
+            const rows: Array<{ height: number; header: Uint8Array }> = [];
+            if (claim.from === chainFrom && chainFrom > 0) {
+              rows.push({
+                height: chainFrom - 1,
+                header: response.previousFilterHeader.slice(),
+              });
+            }
+            for (let i = 0; i < derived.length; i++) {
+              rows.push({
+                height: claim.from + i,
+                header: derived[i]!.slice(),
+              });
+            }
+            ctx.db.filterHeaders.append(rows);
+            ctx.db.peers.markAlive(peer.host, peer.port, true);
+            diagnosticLog(
+              `header batch success range=${claim.from}-${claim.to} peer=${peer.host}:${peer.port} received=${response.filterHashes.length} saved=${rows.length} elapsedMs=${Math.max(0, now() - startedAt)}`,
+            );
+            ok = true;
+          } catch (err) {
+            diagnosticLog(
+              `header batch failure range=${claim.from}-${claim.to} peer=${peer.host}:${peer.port} elapsedMs=${Math.max(0, now() - startedAt)} error=${formatError(err)}`,
+            );
+            throw err;
           }
-          for (let i = 0; i < derived.length; i++) {
-            rows.push({
-              height: claim.from + i,
-              header: derived[i]!.slice(),
-            });
-          }
-          ctx.db.filterHeaders.append(rows);
-          ctx.db.peers.markAlive(peer.host, peer.port, true);
-          ok = true;
         });
 
         if (leased === null || !ok) {
@@ -374,9 +399,12 @@ export function createFiltersDownloadModule(
     chainFrom: number,
     tipTo: number,
   ): Promise<number> {
+    const startedAt = now();
     const stopRow = ctx.db.headers.get(range.to);
     if (!stopRow) throw new Error("missing stop header");
     const expectCount = range.to - range.from + 1;
+    let received = 0;
+    let receivedBytes = 0;
 
     const blockHeaders = ctx.db.headers.loadRange(range.from, range.to);
     const hashToHeight = new Map<string, number>();
@@ -392,12 +420,23 @@ export function createFiltersDownloadModule(
     for (const row of fhRows) {
       filterHeaderByHeight.set(row.height, row.header);
     }
+    const receivedHeights = new Set<number>();
 
     const toStore: Array<{
       height: number;
       blockHashInternalHex: string;
       filter: Uint8Array;
     }> = [];
+    let saved = 0;
+
+    const flushVerified = () => {
+      if (toStore.length === 0) return;
+      const rows = toStore.splice(0);
+      ctx.db.filters.append(rows);
+      saved += rows.length;
+      haveCached += rows.length;
+      emitProgress(chainFrom, tipTo, false);
+    };
 
     const accept = (msg: {
       blockHash: Uint8Array;
@@ -424,6 +463,12 @@ export function createFiltersDownloadModule(
       ) {
         throw new Error("cfilter verification failed");
       }
+      if (receivedHeights.has(height)) {
+        throw new Error(`duplicate cfilter height ${height}`);
+      }
+      receivedHeights.add(height);
+      received++;
+      receivedBytes += msg.filterBytes.length;
       if (!ctx.db.filters.has(height)) {
         toStore.push({
           height,
@@ -433,28 +478,50 @@ export function createFiltersDownloadModule(
       }
     };
 
-    let streamed = false;
-    const filters = await session.getCFilters(
-      range.from,
-      hexToBytes(stopRow.hashInternalHex),
-      expectCount,
-      (msg) => {
-        streamed = true;
-        accept(msg);
-      },
-    );
-    // Test fakes may ignore onFilter and only return the array.
-    if (!streamed) {
-      for (const msg of filters) accept(msg);
-    }
+    try {
+      let streamed = false;
+      const filters = await session.getCFilters(
+        range.from,
+        hexToBytes(stopRow.hashInternalHex),
+        expectCount,
+        (msg) => {
+          streamed = true;
+          accept(msg);
+          if (toStore.length >= persistBatchSize) flushVerified();
+        },
+      );
+      // Test fakes may ignore onFilter and only return the array.
+      if (!streamed) {
+        for (const msg of filters) {
+          accept(msg);
+          if (toStore.length >= persistBatchSize) flushVerified();
+        }
+      }
 
-    if (toStore.length > 0) {
-      ctx.db.filters.append(toStore);
-      haveCached += toStore.length;
-      emitProgress(chainFrom, tipTo, false);
+      flushVerified();
+      ctx.db.peers.markAlive(peer.host, peer.port, true);
+      diagnosticLog(
+        `filter batch success range=${range.from}-${range.to} peer=${peer.host}:${peer.port} received=${received} saved=${saved} bytes=${receivedBytes} elapsedMs=${Math.max(0, now() - startedAt)}`,
+      );
+      return saved;
+    } catch (err) {
+      let persistenceError: unknown;
+      try {
+        flushVerified();
+      } catch (flushErr) {
+        persistenceError = flushErr;
+      }
+      diagnosticLog(
+        `filter batch failure range=${range.from}-${range.to} peer=${peer.host}:${peer.port} received=${received} saved=${saved} bytes=${receivedBytes} elapsedMs=${Math.max(0, now() - startedAt)} error=${formatError(err)}${persistenceError === undefined ? "" : ` persistenceError=${formatError(persistenceError)}`}`,
+      );
+      if (persistenceError !== undefined) {
+        throw new AggregateError(
+          [err, persistenceError],
+          "filter batch and final persistence failed",
+        );
+      }
+      throw err;
     }
-    ctx.db.peers.markAlive(peer.host, peer.port, true);
-    return toStore.length;
   }
 
   /**
@@ -483,6 +550,13 @@ export function createFiltersDownloadModule(
     tipTo: number,
   ): Promise<void> {
     const queue = filterDownloadQueue(chainFrom, tipTo);
+    const missing = queue.reduce(
+      (total, range) => total + range.to - range.from + 1,
+      0,
+    );
+    diagnosticLog(
+      `filter queue range=${chainFrom}-${tipTo} batches=${queue.length} missing=${missing}`,
+    );
     if (queue.length === 0) return;
 
     const failures = new Map<string, number>();
@@ -510,7 +584,18 @@ export function createFiltersDownloadModule(
             } catch {
               const attempts = (failures.get(key) ?? 0) + 1;
               failures.set(key, attempts);
-              if (attempts <= 8) queue.push(range);
+              const remaining =
+                attempts <= 8
+                  ? ctx.db.filters.missingRanges(
+                      range.from,
+                      range.to,
+                      filterBatchSize,
+                    )
+                  : [];
+              if (remaining.length > 0) queue.push(...remaining);
+              diagnosticLog(
+                `filter batch retry range=${key} failure=${attempts}/9 action=${attempts > 8 ? "drop" : remaining.length > 0 ? "requeue" : "complete"} remaining=${remaining.map((r) => `${r.from}-${r.to}`).join(",") || "none"}`,
+              );
               const coolWait = Math.min(1_000, pool.coolDelayMs() || 50);
               await waitForKick(coolWait);
             }
@@ -527,6 +612,9 @@ export function createFiltersDownloadModule(
 
   async function runDownload(): Promise<void> {
     options.onDownloadRun?.();
+    const runId = ++runSequence;
+    const runStartedAt = now();
+    diagnosticLog(`run start id=${runId}`);
     busy = true;
     try {
       while (!stopped) {
@@ -575,7 +663,11 @@ export function createFiltersDownloadModule(
           refreshHaveCached();
           emitProgress(filterFrom, tipTo, true);
 
-          if (refreshPeers().length === 0) {
+          const peers = refreshPeers();
+          diagnosticLog(
+            `sync plan filterRange=${filterFrom}-${tipTo} headerRange=${chainFrom}-${tipTo} cached=${haveCached} peers=${peers.length}`,
+          );
+          if (peers.length === 0) {
             await waitForKick(idleDelayMs);
             continue;
           }
@@ -595,13 +687,19 @@ export function createFiltersDownloadModule(
           refreshHaveCached();
           emitProgress(filterFrom, tipTo, true);
           if (ctx.db.filters.completeInRange(filterFrom, tipTo)) {
+            diagnosticLog(
+              `run complete id=${runId} range=${filterFrom}-${tipTo} cached=${haveCached} remaining=0 elapsedMs=${Math.max(0, now() - runStartedAt)}`,
+            );
             // Drop idle BIP-324 sessions so block-download / peers can use fds.
             await pool.closeAll();
             break;
           }
 
           await waitForKick(50);
-        } catch {
+        } catch (err) {
+          diagnosticLog(
+            `run failure id=${runId} elapsedMs=${Math.max(0, now() - runStartedAt)} error=${formatError(err)}`,
+          );
           await waitForKick(idleDelayMs);
         }
       }
@@ -632,6 +730,9 @@ export function createFiltersDownloadModule(
         module: "filters-download",
         status: "starting",
       });
+      diagnosticLog(
+        `module start concurrency=${concurrency} filterBatchSize=${filterBatchSize} persistBatchSize=${persistBatchSize} headerBatchSize=${headerBatchSize} connectTimeoutMs=${connectTimeoutMs} syncTimeoutMs=${syncTimeoutMs}`,
+      );
       stopped = false;
       unsubHeaders = ctx.bus.on("headers:progress", () => {
         kick();
@@ -669,6 +770,7 @@ export function createFiltersDownloadModule(
       unsubPeers = undefined;
       kick();
       await pool.closeAll();
+      diagnosticLog("module stopped");
       ctx.bus.emit("module:status", {
         module: "filters-download",
         status: "stopped",

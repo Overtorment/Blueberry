@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { Transaction } from "bitcoinjs-lib";
+import { script as bscript, Transaction } from "bitcoinjs-lib";
+import { p2pkh } from "@scure/btc-signer";
 import { HDKey } from "@scure/bip32";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import { deriveWatchWallet } from "../../src/wallet/derive.ts";
 import { usedWatchIndexes } from "../../src/parse/used-indexes.ts";
+import type { WatchWallet } from "../../src/wallet/types.ts";
 
 const MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -45,6 +47,39 @@ describe("usedWatchIndexes", () => {
 
     const used = usedWatchIndexes([{ tx: spend.toBuffer() }], wallet);
     expect(used.external).toEqual([2]);
+  });
+
+  test("detects P2PKH spend via scriptSig without prior receive", () => {
+    const root = HDKey.fromMasterSeed(mnemonicToSeedSync(MNEMONIC));
+    const pubkey = root.derive("m/84'/0'/0'/0/0").publicKey!;
+    const { script, address } = p2pkh(pubkey);
+    const wallet: WatchWallet = {
+      kind: "address",
+      secret: address!,
+      addresses: [
+        {
+          path: "address/0",
+          index: 0,
+          change: false,
+          address: address!,
+          scriptPubKey: new Uint8Array(script),
+          scriptType: "p2pkh",
+        },
+      ],
+      scripts: [new Uint8Array(script)],
+    };
+
+    const spend = new Transaction();
+    spend.version = 2;
+    spend.addInput(new Uint8Array(32).fill(1), 0);
+    spend.setInputScript(
+      0,
+      bscript.compile([Buffer.alloc(71, 2), Buffer.from(pubkey)]),
+    );
+    spend.addOutput(new Uint8Array([0x00, 0x14, ...new Uint8Array(20)]), 1n);
+
+    const used = usedWatchIndexes([{ tx: spend.toBuffer() }], wallet);
+    expect(used.external).toEqual([0]);
   });
 
   test("detects spend via prevout in same batch without witness", () => {

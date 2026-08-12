@@ -49,7 +49,7 @@ function blockBytesWithReceive(script: Uint8Array, value: bigint): Uint8Array {
 }
 
 describe("parse-blocks", () => {
-  test("parses backlog on start and emits wallet:txs", async () => {
+  test("parses backlog after sync:idle and emits wallet:txs", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
     const script = watchScript0();
@@ -69,6 +69,7 @@ describe("parse-blocks", () => {
       { wallet, idleDelayMs: 50, blockGapMs: 0 },
     );
     await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => db.parsedBlocks.has(50) && db.transactions.count() === 1);
     expect(events.length).toBeGreaterThanOrEqual(1);
     expect(db.transactions.list()[0]?.netDeltaSats).toBe(5000);
@@ -82,6 +83,7 @@ describe("parse-blocks", () => {
       { wallet: wallet2, idleDelayMs: 50, blockGapMs: 0 },
     );
     await mod2.start();
+    bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => events.length > before);
     expect(db.transactions.count()).toBe(1);
     await mod2.stop();
@@ -92,10 +94,9 @@ describe("parse-blocks", () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
     const script = watchScript0();
-    // Block 1 is parsed during start()'s initial batch (before blocks:progress subscribe).
-    // Blocks 1+2 are seeded so the first background batch only fetches block 2; block 3 is
-    // injected in onParseBatch after subscribe — listNeedingParse already ran for that batch,
-    // so needsRun must schedule an immediate follow-up (not idleDelayMs).
+    // Blocks 1+2 are seeded. The first sync:idle batch parses block 1; block 3 is
+    // injected during the next batch after listNeedingParse runs, so needsRun must
+    // schedule an immediate follow-up (not idleDelayMs).
     db.blocks.insert({
       height: 1,
       blockHashInternalHex: "11".repeat(32),
@@ -120,7 +121,7 @@ describe("parse-blocks", () => {
       { bus, db },
       {
         wallet,
-        idleDelayMs: 5000,
+        idleDelayMs: 50,
         batchSize: 1,
         blockGapMs: 0,
         onParseBatch: async () => {
@@ -144,6 +145,7 @@ describe("parse-blocks", () => {
       },
     );
     await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
     await waitFor(
       () =>
         db.parsedBlocks.has(1) &&
@@ -180,15 +182,152 @@ describe("parse-blocks", () => {
 
     const mod = createParseBlocksModule(
       { bus, db },
-      { wallet: createWallet(db, { secret: MNEMONIC, addressGap: 4 }), idleDelayMs: 50, blockGapMs: 0 },
+      {
+        wallet: createWallet(db, { secret: MNEMONIC, addressGap: 4 }),
+        idleDelayMs: 50,
+        blockGapMs: 0,
+      },
     );
     await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => db.parsedBlocks.has(11));
     expect(db.parsedBlocks.has(10)).toBe(false);
     expect(errors.length).toBeGreaterThanOrEqual(1);
     expect(errors[0]?.detail).toContain("height 10");
     expect(db.transactions.count()).toBe(1);
     expect(db.transactions.list()[0]?.netDeltaSats).toBe(100);
+    await mod.stop();
+    db.close();
+  });
+
+  test("does not parse backlog until sync:idle", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const script = watchScript0();
+    db.blocks.insert({
+      height: 50,
+      blockHashInternalHex: "ab".repeat(32),
+      block: blockBytesWithReceive(script, 5000n),
+    });
+
+    let batches = 0;
+    const wallet = createWallet(db, { secret: MNEMONIC, addressGap: 4 });
+    const mod = createParseBlocksModule(
+      { bus, db },
+      {
+        wallet,
+        idleDelayMs: 50,
+        blockGapMs: 0,
+        onParseBatch: () => {
+          batches++;
+        },
+      },
+    );
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(batches).toBe(0);
+    expect(db.parsedBlocks.has(50)).toBe(false);
+
+    bus.emit("sync:idle", { at: Date.now() });
+    await waitFor(() => db.parsedBlocks.has(50) && db.transactions.count() === 1);
+    expect(batches).toBeGreaterThanOrEqual(1);
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("sync:catchup pauses parsing; sync:idle resumes", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const script = watchScript0();
+    for (const h of [1, 2, 3]) {
+      db.blocks.insert({
+        height: h,
+        blockHashInternalHex: h.toString(16).padStart(2, "0").repeat(32),
+        block: blockBytesWithReceive(script, BigInt(h)),
+      });
+    }
+
+    const wallet = createWallet(db, {
+      secret: MNEMONIC,
+      addressGap: config.gapLimit + 1,
+    });
+    let catchupEmitted = false;
+    bus.on("wallet:txs", () => {
+      if (catchupEmitted) return;
+      catchupEmitted = true;
+      bus.emit("sync:catchup", { at: Date.now(), reason: "blocks" });
+    });
+    const mod = createParseBlocksModule(
+      { bus, db },
+      {
+        wallet,
+        idleDelayMs: 50,
+        batchSize: 1,
+        blockGapMs: 30,
+      },
+    );
+    await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
+    await waitFor(() => db.parsedBlocks.has(1));
+    await new Promise((r) => setTimeout(r, 120));
+    expect(db.parsedBlocks.has(2)).toBe(false);
+    expect(db.parsedBlocks.has(3)).toBe(false);
+
+    bus.emit("sync:idle", { at: Date.now() });
+    await waitFor(
+      () =>
+        db.parsedBlocks.has(2) &&
+        db.parsedBlocks.has(3) &&
+        db.transactions.count() === 3,
+    );
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("catchup during a block gap pauses the next block until sync:idle", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const script = watchScript0();
+    for (const h of [1, 2]) {
+      db.blocks.insert({
+        height: h,
+        blockHashInternalHex: h.toString(16).padStart(2, "0").repeat(32),
+        block: blockBytesWithReceive(script, BigInt(h)),
+      });
+    }
+
+    let catchupScheduled = false;
+    bus.on("wallet:txs", () => {
+      if (catchupScheduled) return;
+      catchupScheduled = true;
+      setTimeout(() => {
+        bus.emit("sync:catchup", { at: Date.now(), reason: "blocks" });
+      }, 20);
+    });
+
+    const mod = createParseBlocksModule(
+      { bus, db },
+      {
+        wallet: createWallet(db, {
+          secret: MNEMONIC,
+          addressGap: config.gapLimit + 1,
+        }),
+        idleDelayMs: 50,
+        batchSize: 2,
+        blockGapMs: 100,
+      },
+    );
+    await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
+    await waitFor(() => db.parsedBlocks.has(1));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(db.parsedBlocks.has(2)).toBe(false);
+
+    bus.emit("sync:idle", { at: Date.now() });
+    await waitFor(() => db.parsedBlocks.has(2));
+
     await mod.stop();
     db.close();
   });

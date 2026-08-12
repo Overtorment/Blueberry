@@ -6,10 +6,12 @@ import {
 import { config } from "../config.ts";
 import type { MatchedBlock } from "../db/types.ts";
 import { internalHexToDisplayHex } from "../headers/hash.ts";
+import { log as writeLog } from "../log.ts";
 import {
   openBlockSession,
   type BlockSessionApi,
 } from "../net/block-sync.ts";
+import { formatError } from "../net/format-error.ts";
 import type { PlatformNet } from "../net/types.ts";
 import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
@@ -32,6 +34,7 @@ export type BlocksDownloadOptions = {
   now?: () => number;
   /** Test seam: called when a download run starts. */
   onDownloadRun?: () => void;
+  log?: (message: string) => void;
 };
 
 type PeerRef = { host: string; port: number };
@@ -53,6 +56,8 @@ export function createBlocksDownloadModule(
     options.concurrency ?? config.blockConcurrency,
   );
   const now = options.now ?? Date.now;
+  const diagnosticLog =
+    options.log ?? ((message: string) => writeLog("blocks-download", message));
 
   let stopped = true;
   let quiet = false;
@@ -63,6 +68,8 @@ export function createBlocksDownloadModule(
   let loopPromise: Promise<void> | undefined;
   let lastEmitAt = 0;
   let peerCursor = 0;
+  let lastQueueDiagnostic = "";
+  let attemptSequence = 0;
 
   const leasedPeers = new Set<string>();
   const peerCoolUntil = new Map<string, number>();
@@ -152,6 +159,9 @@ export function createBlocksDownloadModule(
     job: MatchedBlock,
     peer: PeerRef,
   ): Promise<boolean> {
+    const startedAt = now();
+    const attempt = ++attemptSequence;
+    diagnosticLog(`block start attempt=${attempt} peer=${peerKey(peer)}`);
     const opened = await openSession(peer.host, peer.port, {
       connect: options.net.connect,
       connectTimeoutMs,
@@ -159,15 +169,21 @@ export function createBlocksDownloadModule(
     });
     if (!opened.ok) {
       coolPeer(peer);
+      diagnosticLog(
+        `session open failure attempt=${attempt} peer=${peerKey(peer)} elapsedMs=${Math.max(0, now() - startedAt)} cooldownMs=${PEER_COOL_MS} error=${formatError(opened.error)}`,
+      );
       return false;
     }
     const session: BlockSessionApi = opened.value;
+    let phase = "download";
     try {
       const hashInternal = hexToBytes(job.blockHashInternalHex);
       const payload = await session.getBlock(hashInternal);
+      phase = "validate";
       const hashDisplay = internalHexToDisplayHex(job.blockHashInternalHex);
       assertBlockPayload(payload, hashDisplay);
       const blockBytes = encodeBlock(payload);
+      phase = "persist";
       const inserted = ctx.db.blocks.insert({
         height: job.height,
         blockHashInternalHex: job.blockHashInternalHex,
@@ -177,9 +193,15 @@ export function createBlocksDownloadModule(
         ctx.db.peers.markUsedForBlocks(peer.host, peer.port);
         emitProgress(true);
       }
+      diagnosticLog(
+        `block success attempt=${attempt} peer=${peerKey(peer)} bytes=${blockBytes.length} elapsedMs=${Math.max(0, now() - startedAt)}`,
+      );
       return inserted || ctx.db.blocks.has(job.height);
-    } catch {
+    } catch (err) {
       coolPeer(peer);
+      diagnosticLog(
+        `block failure attempt=${attempt} peer=${peerKey(peer)} phase=${phase} elapsedMs=${Math.max(0, now() - startedAt)} cooldownMs=${PEER_COOL_MS} error=${formatError(err)}`,
+      );
       return false;
     } finally {
       try {
@@ -217,6 +239,7 @@ export function createBlocksDownloadModule(
         .filter((j) => !inFlight.has(j.height));
 
       if (pending.length === 0 && inFlight.size === 0) {
+        lastQueueDiagnostic = "";
         // Idle: wake on filters:match / peers:updated, and poll DB periodically
         // so a missed kick cannot stall forever (wait ~500ms).
         await waitForKick(PEER_WAIT_MS);
@@ -233,10 +256,18 @@ export function createBlocksDownloadModule(
 
       if (inFlight.size === 0) {
         // Pending work but no usable peers right now.
+        const message =
+          `queue stalled pending=${pending.length} inFlight=0 ` +
+          `leasedPeers=${leasedPeers.size} coolingPeers=${peerCoolUntil.size}`;
+        if (message !== lastQueueDiagnostic) {
+          diagnosticLog(message);
+          lastQueueDiagnostic = message;
+        }
         await waitForKick(PEER_WAIT_MS);
         continue;
       }
 
+      lastQueueDiagnostic = "";
       // Wait for any in-flight download (or a kick) before refilling slots.
       await Promise.race([
         Promise.race([...inFlight.values()]),
@@ -255,6 +286,9 @@ export function createBlocksDownloadModule(
     async start() {
       if (!stopped) return;
       stopped = false;
+      diagnosticLog(
+        `module start concurrency=${concurrency} connectTimeoutMs=${connectTimeoutMs} syncTimeoutMs=${syncTimeoutMs}`,
+      );
       ctx.bus.emit("module:status", {
         module: "blocks-download",
         status: "starting",
@@ -299,6 +333,7 @@ export function createBlocksDownloadModule(
         module: "blocks-download",
         status: "stopped",
       });
+      diagnosticLog("module stopped");
     },
   };
 }

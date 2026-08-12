@@ -46,7 +46,7 @@ export type WalletTxsSnapshot = {
   balanceBtcLabel: string;
   blocksParsed: number;
   blocksTotal: number;
-  /** ms until parse backlog clears; null if unknown or no backlog */
+  /** ms until parse backlog clears; null if unknown, inactive, or no backlog */
   etaMs: number | null;
   txs: WalletTxRow[];
   utxos: WalletUtxoRow[];
@@ -55,6 +55,7 @@ export type WalletTxsSnapshot = {
 export type WalletTxsStore = {
   get(): WalletTxsSnapshot;
   apply(snapshot: WalletTxsSnapshot): void;
+  setParsingActive(active: boolean): void;
   subscribe(listener: () => void): () => void;
 };
 
@@ -166,14 +167,35 @@ export function snapshotFromDb(
 
 export function createWalletTxsStore(): WalletTxsStore {
   let snapshot = emptyWalletTxsSnapshot;
+  let parsingActive = false;
   let samples: { at: number; downloaded: number }[] = [];
   const listeners = new Set<() => void>();
+
+  function notify(): void {
+    for (const listener of [...listeners]) listener();
+  }
 
   return {
     get() {
       return snapshot;
     },
+    setParsingActive(active: boolean) {
+      if (parsingActive === active) return;
+      parsingActive = active;
+      samples = [];
+      if (!active && snapshot.etaMs !== null) {
+        snapshot = { ...snapshot, etaMs: null };
+        notify();
+      }
+    },
     apply(next) {
+      if (!parsingActive) {
+        samples = [];
+        snapshot = { ...next, etaMs: null };
+        notify();
+        return;
+      }
+
       const prev = {
         downloaded: snapshot.blocksParsed,
         total: snapshot.blocksTotal,
@@ -194,7 +216,7 @@ export function createWalletTxsStore(): WalletTxsStore {
         samples = nextSamples;
         snapshot = { ...next, etaMs: nextEta };
       }
-      for (const listener of [...listeners]) listener();
+      notify();
     },
     subscribe(listener) {
       listeners.add(listener);

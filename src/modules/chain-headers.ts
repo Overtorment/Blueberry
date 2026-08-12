@@ -44,8 +44,6 @@ export type ChainHeadersOptions = {
   /** How many peers to ask in parallel for the same locator (first ok wins). */
   racePeers?: number;
   pollIntervalMs?: number;
-  /** delay when a peer returns an empty batch but we are still behind */
-  emptyBatchDelayMs?: number;
   consensus?: HeaderConsensusParams;
   now?: () => number;
   /** seconds for consensus future-time checks */
@@ -238,7 +236,6 @@ export function createChainHeadersModule(
     options.headersTimeoutMs ?? config.headerSyncTimeoutMs;
   const racePeers = Math.max(1, options.racePeers ?? config.headerRacePeers);
   const pollIntervalMs = options.pollIntervalMs ?? 30_000;
-  const emptyBatchDelayMs = options.emptyBatchDelayMs ?? 1_000;
   const consensus = options.consensus ?? BLUEBERRY_HEADER_CONSENSUS;
   const checkpointHeight = consensus.checkpoint.height;
   const now = options.now ?? Date.now;
@@ -427,7 +424,7 @@ export function createChainHeadersModule(
     // Unknown peer tip → total 0 would clobber the TUI DB seed.
     if (maxPeerStartHeight <= checkpointHeight) return;
     const tipHeight = chain?.tipHeight ?? ctx.db.headers.tip()!.height;
-    // Reused sessions keep a stale version.startHeight; floor total at tip.
+    // Floor total at tip when a reused session's startHeight lags the tip.
     const peerTip = Math.max(maxPeerStartHeight, tipHeight);
     ctx.bus.emit("headers:progress", {
       at: now(),
@@ -508,22 +505,20 @@ export function createChainHeadersModule(
       sticky = peer;
       peerIndex += Math.max(1, raced.length);
 
+      if (result.headers.length === 0) {
+        // Empty ⇒ peer has nothing beyond our locator. Drop inflated handshake
+        // startHeight so progress is not stuck below 100%.
+        maxPeerStartHeight = ensureChain().tipHeight;
+        emitProgress();
+        tryFreezeBirthday();
+        await waitForKick(pollIntervalMs);
+        continue;
+      }
+
       if (result.startHeight > checkpointHeight) {
         const prevTotal = maxPeerStartHeight;
         maxPeerStartHeight = Math.max(maxPeerStartHeight, result.startHeight);
         if (maxPeerStartHeight !== prevTotal) emitProgress();
-      }
-
-      if (result.headers.length === 0) {
-        emitProgress();
-        tryFreezeBirthday();
-        const tipHeight = ensureChain().tipHeight;
-        if (tipHeight >= maxPeerStartHeight || maxPeerStartHeight === 0) {
-          await waitForKick(pollIntervalMs);
-        } else {
-          await waitForKick(emptyBatchDelayMs);
-        }
-        continue;
       }
 
       try {

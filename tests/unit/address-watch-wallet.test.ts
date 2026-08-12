@@ -1,0 +1,425 @@
+/**
+ * Single-address watch-only — vectors reuse BlueWallet WIF primary addresses
+ * and BIP-341 taproot example from is-address-valid tests.
+ */
+import {
+  address as btcAddress,
+  payments,
+  Transaction,
+} from "bitcoinjs-lib";
+import { bytesToHex } from "bip158";
+import { describe, expect, test } from "bun:test";
+import { hex } from "@scure/base";
+import { Transaction as ScureTransaction } from "@scure/btc-signer";
+import { createMessageBus } from "../../src/bus/message-bus.ts";
+import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
+import { createParseBlocksModule } from "../../src/modules/parse-blocks.ts";
+import { createReceiveAddressStore } from "../../src/tui/receive-address-store.ts";
+import {
+  buildSend,
+  buildSignedSendTx,
+  buildUnsignedSendPsbt,
+} from "../../src/wallet/build-send-tx.ts";
+import { deriveWatchWallet } from "../../src/wallet/derive.ts";
+import {
+  parseWalletSecret,
+  saveWalletSecret,
+} from "../../src/wallet/secret.ts";
+import { createWallet } from "../../src/wallet/wallet.ts";
+
+const ADDR_BECH32 = "bc1q3rl0mkyk0zrtxfmqn9wpcd3gnaz00yv9yp0hxe";
+const ADDR_LEGACY = "14YZ6iymQtBVQJk6gKnLCk49UScJK7SH4M";
+const ADDR_P2SH = "3CKN8HTCews4rYJYsyub5hjAVm5g5VFdQJ";
+const ADDR_TAPROOT =
+  "bc1pm6lqlel3qxefsx0v39nshtghasvvp6ghn3e5hd5q280j5m9h7csqrkzssu";
+const BIP341_TAPROOT =
+  "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0";
+const ADDR_P2WSH = payments.p2wsh({
+  redeem: { output: Buffer.from([0x51]) },
+}).address!;
+const DEST = "1GX36PGBUrF8XahZEGQqHqnJGW2vCZteoB";
+
+describe("parseWalletSecret address", () => {
+  test("accepts mainnet legacy / nested / native / taproot (trimmed)", () => {
+    expect(parseWalletSecret(`  ${ADDR_BECH32}  `)).toEqual({
+      kind: "address",
+      value: ADDR_BECH32,
+    });
+    expect(parseWalletSecret(ADDR_LEGACY).kind).toBe("address");
+    expect(parseWalletSecret(ADDR_P2SH).kind).toBe("address");
+    expect(parseWalletSecret(ADDR_TAPROOT).kind).toBe("address");
+    expect(parseWalletSecret(BIP341_TAPROOT).kind).toBe("address");
+  });
+
+  test("rejects address-shaped invalid input with an address error", () => {
+    expect(() =>
+      parseWalletSecret("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"),
+    ).toThrow(/invalid mainnet address/i);
+    expect(() =>
+      parseWalletSecret("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4x"),
+    ).toThrow(/invalid mainnet address/i);
+    expect(() =>
+      parseWalletSecret(`${ADDR_BECH32.slice(0, 8)} ${ADDR_BECH32.slice(8)}`),
+    ).toThrow(/invalid mainnet address/i);
+    expect(() =>
+      parseWalletSecret(`${ADDR_LEGACY.slice(0, 8)} ${ADDR_LEGACY.slice(8)}`),
+    ).toThrow(/invalid mainnet address/i);
+    expect(() => parseWalletSecret("not-an-address")).toThrow();
+  });
+
+  test("rejects unsupported P2WSH watch addresses", () => {
+    expect(() => parseWalletSecret(ADDR_P2WSH)).toThrow(/P2WSH.*unsupported/i);
+  });
+
+  test("WIF still wins over address-shaped confusion", () => {
+    const wif = "L4vn2KxgMLrEVpxjfLwxfjnPPQMnx42DCjZJ2H7nN4mdHDyEUWXd";
+    expect(parseWalletSecret(wif).kind).toBe("wif");
+  });
+});
+
+describe("deriveWatchWallet address", () => {
+  test("native segwit → one p2wpkh script matching toOutputScript", () => {
+    const w = deriveWatchWallet(ADDR_BECH32);
+    expect(w.kind).toBe("address");
+    expect(w.secret).toBe(ADDR_BECH32);
+    expect(w.addresses).toHaveLength(1);
+    expect(w.scripts).toHaveLength(1);
+    const a = w.addresses[0]!;
+    expect(a.address).toBe(ADDR_BECH32);
+    expect(a.path).toBe("address/0");
+    expect(a.change).toBe(false);
+    expect(a.index).toBe(0);
+    expect(a.scriptType).toBe("p2wpkh");
+    expect(bytesToHex(a.scriptPubKey)).toBe(
+      Buffer.from(btcAddress.toOutputScript(ADDR_BECH32)).toString("hex"),
+    );
+  });
+
+  test("legacy / nested / taproot labels and script bytes", () => {
+    expect(deriveWatchWallet(ADDR_LEGACY).addresses[0]?.scriptType).toBe(
+      "p2pkh",
+    );
+    expect(deriveWatchWallet(ADDR_P2SH).addresses[0]?.scriptType).toBe(
+      "p2sh-p2wpkh",
+    );
+    expect(deriveWatchWallet(ADDR_TAPROOT).addresses[0]?.scriptType).toBe(
+      "p2tr",
+    );
+  });
+
+  test("gaps argument ignored", () => {
+    const a = deriveWatchWallet(ADDR_BECH32, 1);
+    const b = deriveWatchWallet(ADDR_BECH32, {
+      external: 500,
+      internal: 500,
+    });
+    expect(a.addresses).toHaveLength(1);
+    expect(b.addresses).toHaveLength(1);
+    expect(bytesToHex(a.scripts[0]!)).toBe(bytesToHex(b.scripts[0]!));
+  });
+});
+
+describe("address wallet receive + gaps", () => {
+  test("receive store returns the sole watched address", () => {
+    const db = createSqliteDatabase(":memory:");
+    saveWalletSecret(db, ADDR_BECH32);
+    const wallet = createWallet(db);
+    const store = createReceiveAddressStore();
+
+    store.refresh(db, wallet);
+
+    expect(wallet.snapshot().kind).toBe("address");
+    expect(store.get().address).toBe(ADDR_BECH32);
+    db.close();
+  });
+
+  test("parse-blocks does not grow gaps for address wallets", async () => {
+    const db = createSqliteDatabase(":memory:");
+    saveWalletSecret(db, ADDR_BECH32);
+    const bus = createMessageBus();
+    const wallet = createWallet(db, { addressGap: 1 });
+    const script = wallet.snapshot().scripts[0]!;
+    const tx = new Transaction();
+    tx.addInput(Buffer.alloc(32), 0xffffffff);
+    tx.addOutput(script, 1_000n);
+    db.transactions.upsert({
+      txid: tx.getId(),
+      height: 1,
+      txIndex: 0,
+      blockHashInternalHex: "11".repeat(32),
+      tx: tx.toBuffer(),
+      netDeltaSats: 1_000,
+    });
+    const before = wallet.gaps();
+    const mod = createParseBlocksModule(
+      { bus, db },
+      { wallet, idleDelayMs: 50, blockGapMs: 0 },
+    );
+
+    await mod.start();
+
+    expect(wallet.snapshot().kind).toBe("address");
+    expect(wallet.scripts()).toHaveLength(1);
+    expect(wallet.gaps()).toEqual(before);
+    await mod.stop();
+    db.close();
+  });
+});
+
+describe("buildSend address watch-only", () => {
+  test("builds script-only PSBT for nested P2SH address", () => {
+    const wallet = deriveWatchWallet(ADDR_P2SH);
+    const result = buildSend({
+      secret: ADDR_P2SH,
+      wallet,
+      utxos: [
+        {
+          txid: "44".repeat(32),
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: wallet.scripts[0]!,
+        },
+      ],
+      toAddress: DEST,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: ADDR_P2SH,
+    });
+
+    expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    const tx = ScureTransaction.fromPSBT(hex.decode(result.psbtHex));
+    const input = tx.getInput(0);
+    expect(input.witnessUtxo?.script).toEqual(wallet.scripts[0]!);
+    expect(input.redeemScript).toBeUndefined();
+  });
+
+  test("legacy address PSBT builds when nonWitnessUtxo is attached", () => {
+    const wallet = deriveWatchWallet(ADDR_LEGACY);
+    const fund = new Transaction();
+    fund.version = 2;
+    fund.addInput(Buffer.alloc(32), 0xffffffff);
+    fund.addOutput(wallet.scripts[0]!, 100_000n);
+
+    const result = buildSend({
+      secret: ADDR_LEGACY,
+      wallet,
+      utxos: [
+        {
+          txid: fund.getId(),
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: wallet.scripts[0]!,
+          nonWitnessUtxo: new Uint8Array(fund.toBuffer()),
+        },
+      ],
+      toAddress: DEST,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: ADDR_LEGACY,
+    });
+
+    expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    const tx = ScureTransaction.fromPSBT(hex.decode(result.psbtHex));
+    expect(tx.getInput(0).nonWitnessUtxo).toBeDefined();
+  });
+
+  test("returns unsigned PSBT; overrides mismatched change address; refuses signed builder", () => {
+    const wallet = deriveWatchWallet(ADDR_BECH32);
+    const utxo = {
+      txid: "11".repeat(32),
+      vout: 0,
+      valueSats: 100_000n,
+      scriptPubKey: wallet.scripts[0]!,
+    };
+    const result = buildSend({
+      secret: ADDR_BECH32,
+      wallet,
+      utxos: [utxo],
+      toAddress: DEST,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: ADDR_TAPROOT,
+    });
+    expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    expect(result.psbtHex.startsWith("70736274ff")).toBe(true);
+    expect(result.changeSats).toBeGreaterThan(0n);
+
+    const tx = ScureTransaction.fromPSBT(hex.decode(result.psbtHex));
+    expect(tx.inputsLength).toBe(1);
+    expect(tx.outputsLength).toBe(2);
+    const outAddrs = [tx.getOutputAddress(0), tx.getOutputAddress(1)];
+    expect(outAddrs).toContain(DEST);
+    expect(outAddrs).toContain(ADDR_BECH32);
+    expect(outAddrs).not.toContain(ADDR_TAPROOT);
+
+    expect(() =>
+      buildSignedSendTx({
+        secret: ADDR_BECH32,
+        wallet,
+        utxos: [utxo],
+        toAddress: DEST,
+        amountSats: 50_000n,
+        feeRateSatPerVb: 1,
+        changeAddress: ADDR_BECH32,
+      }),
+    ).toThrow(/mnemonic|WIF|sign/i);
+  });
+
+  test("canonicalizes uppercase bech32 when adjusting fractional fees", () => {
+    const address = ADDR_BECH32.toUpperCase();
+    const wallet = deriveWatchWallet(address);
+    const result = buildSend({
+      secret: address,
+      wallet,
+      utxos: [
+        {
+          txid: "55".repeat(32),
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: wallet.scripts[0]!,
+        },
+      ],
+      toAddress: DEST,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1.1,
+      changeAddress: address,
+    });
+
+    expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    expect(result.feeSats).toBe(
+      BigInt(Math.ceil(1.1 * result.vsize)),
+    );
+    expect(result.changeSats).toBeGreaterThan(0n);
+  });
+
+  test("rejects non-max sends back to the watched address", () => {
+    const wallet = deriveWatchWallet(ADDR_BECH32);
+    expect(() =>
+      buildSend({
+        secret: ADDR_BECH32,
+        wallet,
+        utxos: [
+          {
+            txid: "66".repeat(32),
+            vout: 0,
+            valueSats: 100_000n,
+            scriptPubKey: wallet.scripts[0]!,
+          },
+        ],
+        toAddress: ADDR_BECH32.toUpperCase(),
+        amountSats: 10_000n,
+        feeRateSatPerVb: 1.1,
+        changeAddress: ADDR_BECH32,
+      }),
+    ).toThrow(/watched address/i);
+  });
+
+  test("unsigned builder also rejects non-max sends to watched address", () => {
+    const wallet = deriveWatchWallet(ADDR_BECH32);
+    expect(() =>
+      buildUnsignedSendPsbt({
+        secret: ADDR_BECH32,
+        wallet,
+        utxos: [
+          {
+            txid: "77".repeat(32),
+            vout: 0,
+            valueSats: 100_000n,
+            scriptPubKey: wallet.scripts[0]!,
+          },
+        ],
+        toAddress: ADDR_BECH32,
+        amountSats: 10_000n,
+        feeRateSatPerVb: 1.1,
+        changeAddress: ADDR_BECH32,
+      }),
+    ).toThrow(/watched address/i);
+  });
+
+  test("omits nonWitnessUtxo from native segwit PSBT", () => {
+    const wallet = deriveWatchWallet(ADDR_BECH32);
+    const fund = new Transaction();
+    fund.addInput(Buffer.alloc(32), 0xffffffff);
+    fund.addOutput(wallet.scripts[0]!, 100_000n);
+    const result = buildSend({
+      secret: ADDR_BECH32,
+      wallet,
+      utxos: [
+        {
+          txid: fund.getId(),
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: wallet.scripts[0]!,
+          nonWitnessUtxo: new Uint8Array(fund.toBuffer()),
+        },
+      ],
+      toAddress: DEST,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: ADDR_BECH32,
+    });
+
+    expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    const input = ScureTransaction.fromPSBT(
+      hex.decode(result.psbtHex),
+    ).getInput(0);
+    expect(input.nonWitnessUtxo).toBeUndefined();
+  });
+
+  test("send-max has single output and zero changeSats", () => {
+    const wallet = deriveWatchWallet(ADDR_BECH32);
+    const result = buildSend({
+      secret: ADDR_BECH32,
+      wallet,
+      utxos: [
+        {
+          txid: "22".repeat(32),
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: wallet.scripts[0]!,
+        },
+      ],
+      toAddress: DEST,
+      amountSats: "max",
+      feeRateSatPerVb: 1,
+      changeAddress: ADDR_BECH32,
+    });
+    expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    expect(result.changeSats).toBe(0n);
+    const tx = ScureTransaction.fromPSBT(hex.decode(result.psbtHex));
+    expect(tx.outputsLength).toBe(1);
+    expect(tx.getOutputAddress(0)).toBe(DEST);
+  });
+
+  test("taproot address PSBT keeps the watched output script without key metadata", () => {
+    const wallet = deriveWatchWallet(ADDR_TAPROOT);
+    const result = buildSend({
+      secret: ADDR_TAPROOT,
+      wallet,
+      utxos: [
+        {
+          txid: "33".repeat(32),
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: wallet.scripts[0]!,
+        },
+      ],
+      toAddress: DEST,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: ADDR_TAPROOT,
+    });
+    expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    const tx = ScureTransaction.fromPSBT(hex.decode(result.psbtHex));
+    const input = tx.getInput(0);
+    expect(input.witnessUtxo?.script).toEqual(wallet.scripts[0]!);
+    expect(input.tapInternalKey).toBeUndefined();
+  });
+});
