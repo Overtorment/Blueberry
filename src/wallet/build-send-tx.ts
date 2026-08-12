@@ -9,7 +9,7 @@ import {
   p2tr,
   p2wpkh,
   selectUTXO,
-  type Transaction,
+  Transaction,
 } from "@scure/btc-signer";
 import { scriptHex } from "../parse/extract.ts";
 import {
@@ -87,6 +87,11 @@ function paymentForPubkey(
   }
 }
 
+const ESTIMATION_PUBLIC_KEY = secp256k1.getPublicKey(
+  Uint8Array.from({ length: 32 }, (_, i) => (i === 31 ? 1 : 0)),
+  true,
+);
+
 type AccountKey =
   | {
       kind: "mnemonic";
@@ -102,7 +107,8 @@ type AccountKey =
       kind: "wif";
       privateKey: Uint8Array;
       publicKey: Uint8Array;
-    };
+    }
+  | { kind: "address" };
 
 function accountKey(secret: string): AccountKey {
   const parsed = parseWalletSecret(secret);
@@ -121,6 +127,9 @@ function accountKey(secret: string): AccountKey {
       key: root,
       masterFingerprint: root.fingerprint,
     };
+  }
+  if (parsed.kind === "address") {
+    return { kind: "address" };
   }
   const account = HDKey.fromExtendedKey(parsed.value, BIP84_ZPUB_VERSIONS);
   return {
@@ -150,11 +159,21 @@ function privateKeyAtPath(root: HDKey, path: string): Uint8Array {
   return child.privateKey;
 }
 
+function addressesEqual(a: string | undefined, b: string): boolean {
+  if (a === undefined) return false;
+  const aBech32 = a.toLowerCase().startsWith("bc1");
+  const bBech32 = b.toLowerCase().startsWith("bc1");
+  return aBech32 && bBech32 ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
 function changeSatsFromTx(tx: Transaction, changeAddress: string): bigint {
   let changeSats = 0n;
   for (let i = 0; i < tx.outputsLength; i++) {
     const out = tx.getOutput(i);
-    if (tx.getOutputAddress(i) === changeAddress && out.amount !== undefined) {
+    if (
+      addressesEqual(tx.getOutputAddress(i), changeAddress) &&
+      out.amount !== undefined
+    ) {
       changeSats = out.amount;
     }
   }
@@ -177,7 +196,7 @@ function applyFractionalFee(
   if (excess <= 0n) return selectedFee;
 
   for (let i = 0; i < tx.outputsLength; i++) {
-    if (tx.getOutputAddress(i) !== changeAddress) continue;
+    if (!addressesEqual(tx.getOutputAddress(i), changeAddress)) continue;
     const out = tx.getOutput(i);
     if (out.amount === undefined) continue;
     tx.updateOutput(i, { amount: out.amount + excess });
@@ -259,6 +278,13 @@ function buildDraftTx(params: BuildSendTxParams): {
   if (!(params.feeRateSatPerVb > 0)) throw new Error("fee rate must be positive");
 
   const account = accountKey(params.secret);
+  if (account.kind === "address" && !sendMax) {
+    const watched = params.wallet.addresses[0];
+    if (!watched) throw new Error("address wallet missing watched address");
+    if (addressesEqual(params.toAddress, watched.address)) {
+      throw new Error("cannot send back to the watched address");
+    }
+  }
   const signPaths: string[] = [];
 
   const inputs = params.utxos.map((u) => {
@@ -287,6 +313,25 @@ function buildDraftTx(params: BuildSendTxParams): {
       };
     }
 
+    if (account.kind === "address") {
+      if (scriptType === "p2pkh" && !u.nonWitnessUtxo) {
+        throw new Error(
+          "legacy p2pkh input requires nonWitnessUtxo (previous transaction)",
+        );
+      }
+      return {
+        txid: hex.decode(u.txid),
+        index: u.vout,
+        witnessUtxo: {
+          script: u.scriptPubKey,
+          amount: u.valueSats,
+        },
+        ...(scriptType === "p2pkh" && u.nonWitnessUtxo
+          ? { nonWitnessUtxo: u.nonWitnessUtxo }
+          : {}),
+      };
+    }
+
     // BIP84 HD: always p2wpkh
     const pubkey = publicKeyAtAddress(account, addr);
     const spend = p2wpkh(pubkey);
@@ -310,7 +355,67 @@ function buildDraftTx(params: BuildSendTxParams): {
     };
   });
 
-  const { tx, feeSats, vsize } = selectSendTx(inputs, params);
+  /*
+   * Address-only watches lack key metadata needed by scure's estimator:
+   * - taproot exposes the tweaked output key, not its internal key
+   * - P2SH exposes the script hash, not its redeem script
+   * Supply same-size placeholders for selection, then restore the original
+   * script-only inputs before exporting the PSBT.
+   */
+  const addressInputNeedsEstimate =
+    account.kind === "address" &&
+    params.utxos.some((u) => {
+      const type = scriptTypeOf(
+        addressForScript(params.wallet, u.scriptPubKey),
+      );
+      return type === "p2tr" || type === "p2sh-p2wpkh";
+    });
+  const selectionInputs = addressInputNeedsEstimate
+    ? inputs.map((input, index) => {
+        const script = params.utxos[index]!.scriptPubKey;
+        const type = scriptTypeOf(addressForScript(params.wallet, script));
+        if (type === "p2tr") {
+          return { ...input, tapInternalKey: script.slice(2) };
+        }
+        if (type === "p2sh-p2wpkh") {
+          const estimate = p2sh(p2wpkh(ESTIMATION_PUBLIC_KEY));
+          return {
+            ...input,
+            redeemScript: estimate.redeemScript,
+            witnessUtxo: {
+              script: estimate.script,
+              amount: input.witnessUtxo.amount,
+            },
+          };
+        }
+        return input;
+      })
+    : inputs;
+  const selected = selectSendTx(selectionInputs, params);
+  let tx = selected.tx;
+  if (addressInputNeedsEstimate) {
+    tx = new Transaction({
+      version: selected.tx.version,
+      lockTime: selected.tx.lockTime,
+    });
+    for (let i = 0; i < selected.tx.inputsLength; i++) {
+      const selectedInput = selected.tx.getInput(i);
+      if (selectedInput.txid === undefined || selectedInput.index === undefined) {
+        throw new Error("selected input missing outpoint");
+      }
+      const input = inputs.find(
+        (candidate) =>
+          candidate.index === selectedInput.index &&
+          hex.encode(candidate.txid) === hex.encode(selectedInput.txid!),
+      );
+      if (!input) throw new Error("selected input is not a requested UTXO");
+      tx.addInput({ ...input, sequence: selectedInput.sequence });
+    }
+    for (let i = 0; i < selected.tx.outputsLength; i++) {
+      tx.addOutput(selected.tx.getOutput(i));
+    }
+  }
+  const { feeSats, vsize } = selected;
   return { tx, signPaths, account, feeSats, vsize };
 }
 
@@ -319,7 +424,7 @@ function buildDraftTx(params: BuildSendTxParams): {
  */
 export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult {
   const { tx, signPaths, account } = buildDraftTx(params);
-  if (account.kind === "zpub") {
+  if (account.kind === "zpub" || account.kind === "address") {
     throw new Error("signing requires a mnemonic or WIF wallet secret");
   }
   if (account.kind === "wif") {
@@ -343,7 +448,7 @@ export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult 
 }
 
 /**
- * Build an unsigned PSBT (no signing). Works with mnemonic, zpub, or WIF.
+ * Build an unsigned PSBT (no signing). Works with mnemonic, zpub, WIF, or address.
  */
 export function buildUnsignedSendPsbt(
   params: BuildSendTxParams,
@@ -362,12 +467,20 @@ export function buildUnsignedSendPsbt(
 }
 
 /**
- * Mnemonic/WIF → signed tx hex; zpub → unsigned PSBT for air-gapped / hardware signing.
+ * Mnemonic/WIF → signed tx hex; zpub/address → unsigned PSBT.
  */
 export function buildSend(params: BuildSendTxParams): BuildSendResult {
   const parsed = parseWalletSecret(params.secret);
   if (parsed.kind === "mnemonic" || parsed.kind === "wif") {
     return buildSignedSendTx(params);
+  }
+  if (parsed.kind === "address" && params.amountSats !== "max") {
+    const watched = params.wallet.addresses[0];
+    if (!watched) throw new Error("address wallet missing watched address");
+    return buildUnsignedSendPsbt({
+      ...params,
+      changeAddress: watched.address,
+    });
   }
   return buildUnsignedSendPsbt(params);
 }

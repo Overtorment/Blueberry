@@ -14,6 +14,7 @@ import { createWallet } from "../../src/wallet/wallet.ts";
 /** BlueWallet LegacyWallet */
 const WIF_LEGACY = "L4ccWrPMmFDZw4kzAKFqJNxgHANjdy6b7YKNXMwB4xac4FLF3Tov";
 const DEST = "1GX36PGBUrF8XahZEGQqHqnJGW2vCZteoB";
+const ADDR_BECH32 = "bc1q3rl0mkyk0zrtxfmqn9wpcd3gnaz00yv9yp0hxe";
 
 describe("buildActiveSendTx attachNonWitnessUtxos", () => {
   test("attaches prev tx from DB for legacy p2pkh inputs", () => {
@@ -64,6 +65,38 @@ describe("buildActiveSendTx attachNonWitnessUtxos", () => {
     const tx = Transaction.fromRaw(hex.decode(result.txHex));
     expect(tx.isFinal).toBe(true);
     expect(tx.inputsLength).toBe(1);
+    db.close();
+  });
+});
+
+describe("buildActiveSendTx address change", () => {
+  test("change goes to the watched address for address wallets", () => {
+    const db = createSqliteDatabase(":memory:");
+    saveWalletSecret(db, ADDR_BECH32);
+    const wallet = createWallet(db);
+    setActiveSendContext(db, wallet);
+    const script = wallet.snapshot().scripts[0]!;
+
+    const result = buildActiveSendTx({
+      utxos: [
+        {
+          txid: "11".repeat(32),
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: script,
+        },
+      ],
+      toAddress: DEST,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1,
+    });
+
+    expect(result.kind).toBe("psbt");
+    if (result.kind !== "psbt") throw new Error("unreachable");
+    expect(result.changeSats).toBeGreaterThan(0n);
+    const tx = Transaction.fromPSBT(hex.decode(result.psbtHex));
+    const outputs = [tx.getOutputAddress(0), tx.getOutputAddress(1)];
+    expect(outputs).toContain(ADDR_BECH32);
     db.close();
   });
 });

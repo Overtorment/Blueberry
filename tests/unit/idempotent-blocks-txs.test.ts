@@ -88,6 +88,7 @@ describe("idempotent blocks + txs (rematch)", () => {
       { wallet: watchWallet, idleDelayMs: 50, blockGapMs: 0 },
     );
     await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => db.parsedBlocks.has(100) && db.transactions.count() === 1);
     expect(db.transactions.list()[0]?.txid).toBe(txid);
     expect(db.matchedBlocks.listNeedingDownload(10)).toEqual([]);

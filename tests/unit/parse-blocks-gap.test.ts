@@ -79,6 +79,7 @@ describe("parse-blocks gap growth", () => {
       { wallet: watch, idleDelayMs: 50, blockGapMs: 0 },
     );
     await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => loadWatchGaps(db).external === grown);
     expect(loadWatchGaps(db).internal).toBe(window);
     expect(db.transactions.minHeight()).toBe(3);
@@ -117,6 +118,7 @@ describe("parse-blocks gap growth", () => {
       { wallet: watch, idleDelayMs: 50, blockGapMs: 0 },
     );
     await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => {
       const used = usedWatchIndexes(db.transactions.list(), watch.snapshot());
       return used.external.includes(45);

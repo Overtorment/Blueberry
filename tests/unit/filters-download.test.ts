@@ -421,6 +421,63 @@ describe("filters-download", () => {
     db.close();
   });
 
+  test("rejects duplicate cfilter messages from a peer", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const lines: string[] = [];
+    let opens = 0;
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        persistBatchSize: 1,
+        coolMs: 1,
+        log: (line) => lines.push(line),
+        openSession: async () => {
+          opens++;
+          const base = createScriptedSession(fixture);
+          if (opens > 1) return { ok: true, value: base };
+          return {
+            ok: true,
+            value: {
+              ...base,
+              async getCFilters(startHeight, stopHash, expectCount, onFilter) {
+                const filters = await base.getCFilters(
+                  startHeight,
+                  stopHash,
+                  expectCount,
+                );
+                const duplicate = filters[0]!;
+                for (let i = 0; i < expectCount; i++) {
+                  if (onFilter) await onFilter(duplicate);
+                }
+                return Array.from({ length: expectCount }, () => duplicate);
+              },
+            },
+          };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    expect(
+      lines.some(
+        (line) =>
+          line.includes("filter batch failure") &&
+          line.includes("duplicate cfilter height"),
+      ),
+    ).toBe(true);
+    await mod.stop();
+    db.close();
+  });
+
   test("persists bootstrap prev at from-1 when from > 0", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
@@ -454,6 +511,7 @@ describe("filters-download", () => {
     db.headers.append(dbHeaderWrites(fixture.headers));
     seedPeer(db);
 
+    const lines: string[] = [];
     const mod = createFiltersDownloadModule(
       { bus, db },
       {
@@ -462,6 +520,7 @@ describe("filters-download", () => {
         filterBatchSize: 1,
         headerBatchSize: 1,
         idleDelayMs: 20,
+        log: (line) => lines.push(line),
         openSession: async () => ({
           ok: true,
           value: {
@@ -486,6 +545,13 @@ describe("filters-download", () => {
     expect(db.filterHeaders.get(fixture.from)).toBeNull();
     expect(db.filters.count()).toBe(0);
     await mod.stop();
+    expect(
+      lines.some((line) =>
+        /header batch failure range=998-1000 peer=1\.1\.1\.1:8333 elapsedMs=\d+ error=.*cfheaders verification failed/.test(
+          line,
+        ),
+      ),
+    ).toBe(true);
     db.close();
   });
 
@@ -497,6 +563,7 @@ describe("filters-download", () => {
     seedPeer(db);
 
     let calls = 0;
+    const lines: string[] = [];
     const mod = createFiltersDownloadModule(
       { bus, db },
       {
@@ -505,6 +572,7 @@ describe("filters-download", () => {
         filterBatchSize: 10,
         idleDelayMs: 20,
         coolMs: 1,
+        log: (line) => lines.push(line),
         openSession: async () => {
           calls++;
           if (calls === 1) {
@@ -526,6 +594,214 @@ describe("filters-download", () => {
     await mod.start();
     await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
     expect(calls).toBeGreaterThanOrEqual(2);
+    await mod.stop();
+    expect(
+      lines.some((line) =>
+        /filter batch failure range=998-1000 peer=1\.1\.1\.1:8333 received=0 saved=0 bytes=0 elapsedMs=\d+ error=.*unexpected EOF/.test(
+          line,
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((line) =>
+        /filter batch retry range=998-1000 failure=1\/9 action=requeue/.test(
+          line,
+        ),
+      ),
+    ).toBe(true);
+    db.close();
+  });
+
+  test("persists verified filters before an incomplete batch fails", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    let opens = 0;
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        persistBatchSize: 3,
+        coolMs: 60_000,
+        openSession: async () => {
+          opens++;
+          if (opens > 1) return { ok: false, error: "still cooling" };
+          const base = createScriptedSession(fixture);
+          return {
+            ok: true,
+            value: {
+              ...base,
+              async getCFilters(startHeight, stopHash, expectCount, onFilter) {
+                const filters = await base.getCFilters(
+                  startHeight,
+                  stopHash,
+                  expectCount,
+                );
+                for (const item of filters.slice(0, 2)) {
+                  if (onFilter) await onFilter(item);
+                }
+                throw new Error("unexpected EOF");
+              },
+            },
+          };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 2);
+    expect(db.filters.has(998)).toBe(true);
+    expect(db.filters.has(999)).toBe(true);
+    expect(db.filters.has(1000)).toBe(false);
+    await mod.stop();
+    db.close();
+  });
+
+  test("logs network and persistence errors when final partial flush fails", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const append = db.filters.append.bind(db.filters);
+    let failNextAppend = true;
+    db.filters.append = (rows) => {
+      if (failNextAppend) {
+        failNextAppend = false;
+        throw new Error("disk full");
+      }
+      append(rows);
+    };
+
+    const lines: string[] = [];
+    let opens = 0;
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        persistBatchSize: 3,
+        coolMs: 1,
+        log: (line) => lines.push(line),
+        openSession: async () => {
+          opens++;
+          const base = createScriptedSession(fixture);
+          if (opens > 1) return { ok: true, value: base };
+          return {
+            ok: true,
+            value: {
+              ...base,
+              async getCFilters(startHeight, stopHash, expectCount, onFilter) {
+                const filters = await base.getCFilters(
+                  startHeight,
+                  stopHash,
+                  expectCount,
+                );
+                for (const item of filters.slice(0, 2)) {
+                  if (onFilter) await onFilter(item);
+                }
+                throw new Error("unexpected EOF");
+              },
+            },
+          };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() =>
+      lines.some(
+        (line) =>
+          line.includes("error=unexpected EOF") &&
+          line.includes("persistenceError=disk full"),
+      ),
+    );
+    await mod.stop();
+    db.close();
+  });
+
+  test("retries only the unpersisted tail of a partial batch", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const requests: Array<{ start: number; count: number }> = [];
+    let opens = 0;
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        persistBatchSize: 2,
+        coolMs: 1,
+        openSession: async () => {
+          opens++;
+          const base = createScriptedSession(fixture);
+          if (opens === 1) {
+            return {
+              ok: true,
+              value: {
+                ...base,
+                async getCFilters(
+                  startHeight,
+                  stopHash,
+                  expectCount,
+                  onFilter,
+                ) {
+                  requests.push({ start: startHeight, count: expectCount });
+                  const filters = await base.getCFilters(
+                    startHeight,
+                    stopHash,
+                    expectCount,
+                  );
+                  for (const item of filters.slice(0, 2)) {
+                    if (onFilter) await onFilter(item);
+                  }
+                  throw new Error("unexpected EOF");
+                },
+              },
+            };
+          }
+          return {
+            ok: true,
+            value: {
+              ...base,
+              async getCFilters(
+                startHeight,
+                stopHash,
+                expectCount,
+                onFilter,
+              ) {
+                requests.push({ start: startHeight, count: expectCount });
+                return base.getCFilters(
+                  startHeight,
+                  stopHash,
+                  expectCount,
+                  onFilter,
+                );
+              },
+            },
+          };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    expect(requests.slice(0, 2)).toEqual([
+      { start: 998, count: 3 },
+      { start: 1000, count: 1 },
+    ]);
     await mod.stop();
     db.close();
   });
@@ -779,6 +1055,7 @@ describe("filters-download", () => {
     });
 
     let opens = 0;
+    const lines: string[] = [];
     const mod = createFiltersDownloadModule(
       { bus, db },
       {
@@ -787,6 +1064,7 @@ describe("filters-download", () => {
         filterBatchSize: 10,
         idleDelayMs: 20,
         coolMs: 1,
+        log: (line) => lines.push(line),
         openSession: async () => {
           opens++;
           if (opens === 1) {
@@ -802,6 +1080,13 @@ describe("filters-download", () => {
     expect(opens).toBeGreaterThanOrEqual(2);
     expect(db.peers.listAlive().some((p) => p.host === "8.8.8.8")).toBe(true);
     await mod.stop();
+    expect(
+      lines.some((line) =>
+        /session open failure peer=8\.8\.8\.8:8333 elapsedMs=\d+ cooldownMs=1 error=boom/.test(
+          line,
+        ),
+      ),
+    ).toBe(true);
     db.close();
   });
 
@@ -893,6 +1178,54 @@ describe("filters-download", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(downloadRuns.count).toBe(runsAfterSync);
     await mod.stop();
+    db.close();
+  });
+
+  test("logs successful filter batches with peer metrics", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    const lines: string[] = [];
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        filterBatchSize: 10,
+        openSession: makeOpenSession(fixture),
+        log: (line) => lines.push(line),
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.filters.countInRange(fixture.from, fixture.to) === 3);
+    await mod.stop();
+
+    expect(
+      lines.some((line) =>
+        /filter batch success range=998-1000 peer=1\.1\.1\.1:8333 received=3 saved=3 bytes=9 elapsedMs=\d+/.test(
+          line,
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((line) =>
+        /filter queue range=998-1000 batches=1 missing=3/.test(line),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((line) =>
+        /sync plan filterRange=998-1000 headerRange=998-1000 cached=0 peers=1/.test(
+          line,
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      lines.some((line) => /run complete .*remaining=0/.test(line)),
+    ).toBe(true);
     db.close();
   });
 });

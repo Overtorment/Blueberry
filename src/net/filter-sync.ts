@@ -165,6 +165,32 @@ function armTimeout(
   return timer;
 }
 
+export function createInactivityTimeout(
+  controller: AbortController,
+  ms: number,
+  label: string,
+): { refresh(): void; clear(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const refresh = () => {
+    if (controller.signal.aborted) return;
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(() => {
+      controller.abort(new Error(`${label} inactive for ${ms}ms`));
+    }, ms);
+    timer.unref?.();
+  };
+
+  refresh();
+  return {
+    refresh,
+    clear() {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
+
 function abortError(controller: AbortController): Error {
   return controller.signal.reason instanceof Error
     ? controller.signal.reason
@@ -189,6 +215,23 @@ function raceAbort<T>(
       );
     }),
   ]);
+}
+
+export async function runWithInactivityTimeout<T>(
+  ms: number,
+  label: string,
+  work: (
+    controller: AbortController,
+    activity: () => void,
+  ) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = createInactivityTimeout(controller, ms, label);
+  try {
+    return await raceAbort(work(controller, timeout.refresh), controller);
+  } finally {
+    timeout.clear();
+  }
 }
 
 function wrapSessionClose(
@@ -271,7 +314,10 @@ function createFilterSessionApi(
         };
       }),
     getCFilters: (startHeight, stopHash, expectCount, onFilter) =>
-      withSyncTimeout("cfilters", async (controller) => {
+      runWithInactivityTimeout(syncTimeoutMs, "cfilters", async (
+        controller,
+        activity,
+      ) => {
         await sendBip157(protocol, {
           command: "getcfilters",
           msg: { filterType: FILTER_TYPE_BASIC, startHeight, stopHash },
@@ -286,6 +332,7 @@ function createFilterSessionApi(
             BIP157_SHORT_IDS.cfilter,
             controller,
           );
+          activity();
           const decoded = decodeCFilter(payload);
           const item = {
             blockHash: decoded.blockHash,

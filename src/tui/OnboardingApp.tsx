@@ -184,12 +184,12 @@ export function OnboardingApp({
         <box width="80%" height={8} flexGrow={0}>
           <Panel title="Import" state="active" accent="magenta" height="100%">
             <text fg={THEME.fgDim}>
-              Enter BIP39 seed, account zpub, or WIF private key
+              Enter BIP39 seed, account zpub, WIF private key, or address
             </text>
             <input
               focused
               value={value}
-              placeholder="seed words, zpub, or WIF…"
+              placeholder="seed words, zpub, WIF, or address…"
               onInput={(v) => {
                 setValue(v);
                 if (error) setError(null);

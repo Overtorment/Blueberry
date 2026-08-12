@@ -43,7 +43,8 @@ function attachNonWitnessUtxos(
  * Build a send using the active DB + wallet.
  * BIP84: change from first unused internal.
  * WIF: change = preferred receive address (earliest activity / native default).
- * Mnemonic/WIF → signed tx; zpub → unsigned PSBT.
+ * Address: change = the sole watched address.
+ * Mnemonic/WIF → signed tx; zpub/address → unsigned PSBT.
  */
 export function buildActiveSendTx(params: SendBuildParams): BuildSendResult {
   if (!active) throw new Error("send context not initialized");
@@ -58,6 +59,10 @@ export function buildActiveSendTx(params: SendBuildParams): BuildSendResult {
       watch,
       db.transactions.list(),
     ).address;
+  } else if (watch.kind === "address") {
+    const addr = watch.addresses[0];
+    if (!addr) throw new Error("address wallet missing watched address");
+    changeAddress = addr.address;
   } else {
     const used = usedWatchIndexes(
       db.transactions.list().map((t) => ({ tx: t.tx })),
