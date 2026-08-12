@@ -3,6 +3,7 @@ import {
   openFilterSession,
   type FilterSessionApi,
 } from "./filter-sync.ts";
+import { formatError } from "./format-error.ts";
 import type { TcpConnect } from "./types.ts";
 
 export type FilterPoolPeer = { host: string; port: number };
@@ -18,6 +19,8 @@ export type FilterSessionPoolOptions = {
   now?: () => number;
   /** Fired when open socket count may have changed (session or connecting). */
   onOpenCount?: (open: number) => void;
+  /** Optional batch-sync diagnostics sink. */
+  onDiagnostic?: (message: string) => void;
 };
 
 type Endpoint = {
@@ -51,6 +54,7 @@ export function createFilterSessionPool(options: FilterSessionPoolOptions) {
   const coolMs = options.coolMs ?? 30_000;
   const now = options.now ?? Date.now;
   const onOpenCount = options.onOpenCount;
+  const onDiagnostic = options.onDiagnostic;
 
   const endpoints = new Map<string, Endpoint>();
   let peerOrder: string[] = [];
@@ -161,16 +165,31 @@ export function createFilterSessionPool(options: FilterSessionPoolOptions) {
 
   async function ensureSession(ep: Endpoint): Promise<FilterSessionApi | null> {
     if (ep.session) return ep.session;
-    const result = await openSession(ep.peer.host, ep.peer.port, {
-      connectTimeoutMs,
-      syncTimeoutMs,
-      connect,
-    });
+    const startedAt = now();
+    let result: Awaited<ReturnType<typeof openSession>>;
+    try {
+      result = await openSession(ep.peer.host, ep.peer.port, {
+        connectTimeoutMs,
+        syncTimeoutMs,
+        connect,
+      });
+    } catch (err) {
+      onDiagnostic?.(
+        `session open failure peer=${ep.peer.host}:${ep.peer.port} elapsedMs=${Math.max(0, now() - startedAt)} cooldownMs=${coolMs} error=${formatError(err)}`,
+      );
+      throw err;
+    }
     if (!result.ok) {
       ep.coolUntil = now() + coolMs;
+      onDiagnostic?.(
+        `session open failure peer=${ep.peer.host}:${ep.peer.port} elapsedMs=${Math.max(0, now() - startedAt)} cooldownMs=${coolMs} error=${result.error}`,
+      );
       return null;
     }
     ep.session = result.value;
+    onDiagnostic?.(
+      `session open success peer=${ep.peer.host}:${ep.peer.port} elapsedMs=${Math.max(0, now() - startedAt)} services=${result.value.services}`,
+    );
     return ep.session;
   }
 

@@ -28,18 +28,17 @@ export const config = {
    */
   peerConcurrency: 30,
   /**
-   * After handshake, how long to wait for compact-filter traffic (getcfheaders /
-   * getcfilters). Batches can be large, so this is usually looser than
-   * peerProbeTimeoutMs. Too low fails big batches on slow links; too high delays
-   * noticing a stalled filter peer.
+   * After handshake, how long to wait for compact-filter traffic. This is a
+   * total response budget for getcfheaders and an inactivity budget, refreshed
+   * per received filter, for getcfilters.
    */
-  filterSyncTimeoutMs: 120_000,
+  filterSyncTimeoutMs: 30_000,
   /**
    * How many filter-download sessions may run at once. With the batch sizes below,
    * this is the main knob for filter-sync throughput. Too low stretches the scan;
    * too high multiplies bandwidth and peer load.
    */
-  filterConcurrency: 30,
+  filterConcurrency: 10,
   /**
    * How many compact-filter headers to ask for per request. Larger batches mean
    * fewer round trips but heavier replies and more pain if a peer dies mid-batch
@@ -52,7 +51,7 @@ export const config = {
    * Same tradeoff as filter-header batches: throughput vs. timeout risk and retry
    * cost. Too small is chatty; too large is slow to fail and expensive to redo.
    */
-  filterBatchSize: 1000,
+  filterBatchSize: 100,
   /**
    * Connect + handshake budget for a peer used only to download blocks (separate
    * from general peerProbeTimeoutMs). Too low drops usable peers early; too high
@@ -70,7 +69,7 @@ export const config = {
    * matching has flagged blocks of interest. Too low stretches catch-up; too high
    * spikes bandwidth and open sessions.
    */
-  blockConcurrency: 30,
+  blockConcurrency: 10,
   /**
    * BIP44-style unused-address lookaround. When a used index falls in the last
    * gapLimit of the watch window, grow that chain by gapLimit and rematch.
