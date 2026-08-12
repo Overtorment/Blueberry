@@ -190,12 +190,19 @@ describe("chain-headers", () => {
     });
     bus.emit("peers:updated", { at: Date.now() });
     await waitFor(
-      () => events.length >= 1 && db.headers.tip()?.height === CHECKPOINT_HEIGHT + 1,
+      () =>
+        db.headers.tip()?.height === CHECKPOINT_HEIGHT + 1 &&
+        events.some((e) => e.downloaded === 1 && e.total === 100),
     );
     expect(db.headers.tip()?.hashInternalHex).toBe(
       bytesToHex(headerHashInternal(nextHeader)),
     );
-    expect(events.at(-1)).toEqual({ downloaded: 1, total: 100 });
+    // Empty follow-up clamps the inflated handshake tip to local tip.
+    await waitFor(() => {
+      const last = events.at(-1);
+      return last?.downloaded === 1 && last.total === 1;
+    });
+    expect(events.at(-1)).toEqual({ downloaded: 1, total: 1 });
     await mod.stop();
     db.close();
   });
@@ -357,7 +364,7 @@ describe("chain-headers", () => {
       bytesToHex(headerHashInternal(heavierFork[2]!)),
     );
     expect(db.headers.count()).toBe(5); // checkpoint + 4 on winning tip
-    expect(events.at(-1)).toEqual({ downloaded: 4, total: 10 });
+    expect(events.at(-1)).toEqual({ downloaded: 4, total: 4 });
     await mod.stop();
     db.close();
   });
@@ -464,7 +471,7 @@ describe("chain-headers", () => {
     db.close();
   });
 
-  test("backs off between empty batches when behind", async () => {
+  test("backs off between empty header batches", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
     db.peers.upsert({
@@ -483,8 +490,7 @@ describe("chain-headers", () => {
         net: stubPlatformNet(),
         connectTimeoutMs: 100,
         headersTimeoutMs: 100,
-        pollIntervalMs: 10_000,
-        emptyBatchDelayMs: 80,
+        pollIntervalMs: 80,
         now: () => Date.now(),
         fetchBatch: async () => {
           callAt.push(Date.now());
