@@ -64,7 +64,7 @@ export function createTuiModule(
       });
       matchingProgressStore.applyEvent({
         at: Date.now(),
-        matched: ctx.db.filters.countScanned(),
+        scanned: ctx.db.filters.countScanned(),
         total: filterTotal,
       });
       blocksMatchedStore.applyEvent({

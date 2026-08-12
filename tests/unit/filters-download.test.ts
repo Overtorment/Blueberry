@@ -160,6 +160,7 @@ function createScriptedSession(
     badHeight?: number;
     onOpen?: () => void;
     holdCfilt?: Promise<void>;
+    holdCfHeaders?: Promise<void>;
   },
 ): FilterSessionApi {
   options?.onOpen?.();
@@ -184,6 +185,7 @@ function createScriptedSession(
       return out;
     },
     async getCFHeaders(startHeight, stopHash) {
+      if (options?.holdCfHeaders) await options.holdCfHeaders;
       const stopHeight = headers.find(
         (h) => h.hashInternalHex === bytesToHex(stopHash),
       )!.height;
@@ -500,6 +502,127 @@ describe("filters-download", () => {
     expect(db.filterHeaders.get(fixture.from - 1)?.header).toEqual(
       fixture.bootstrapPrev,
     );
+    await mod.stop();
+    db.close();
+  });
+
+  test("discards in-flight cfheaders after reorg replaces stop hash", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    const forkTip = mineHeader({
+      previousHash: hexToBytes(fixture.headers[1]!.hashInternalHex),
+      bits: EASY_BITS,
+      timestamp: 2_100,
+      marker: 120,
+    });
+    const forkRecord = record(1000, forkTip);
+
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    maybeFreezeWalletBirthday(db, fixture.from);
+    seedPeer(db);
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        idleDelayMs: 20,
+        openSession: async () => ({
+          ok: true,
+          value: createScriptedSession(fixture, { holdCfHeaders: held }),
+        }),
+      },
+    );
+
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 60));
+
+    db.transaction(() => {
+      db.rewindAfter(999);
+      db.headers.replaceAfter(999, [
+        {
+          height: forkRecord.height,
+          hashInternalHex: forkRecord.hashInternalHex,
+          header: hexToBytes(forkRecord.headerHex),
+        },
+      ]);
+    });
+    expect(db.filterHeaders.tip()).toBeNull();
+
+    release();
+    await new Promise((r) => setTimeout(r, 120));
+
+    expect(db.filterHeaders.get(1000)).toBeNull();
+    expect(db.filterHeaders.tip()).toBeNull();
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("discards in-flight cfilters for heights replaced by a reorg", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const fixture = buildFilterFixture();
+    const forkTip = mineHeader({
+      previousHash: hexToBytes(fixture.headers[1]!.hashInternalHex),
+      bits: EASY_BITS,
+      timestamp: 2_100,
+      marker: 121,
+    });
+    const forkRecord = record(1000, forkTip);
+
+    db.headers.append(dbHeaderWrites(fixture.headers));
+    seedPeer(db);
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const mod = createFiltersDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        concurrency: 1,
+        idleDelayMs: 20,
+        openSession: async () => ({
+          ok: true,
+          value: createScriptedSession(fixture, { holdCfilt: held }),
+        }),
+      },
+    );
+
+    await mod.start();
+    // Filter headers complete, then getCFilters is held in flight.
+    await waitFor(() => db.filterHeaders.get(1000) !== null);
+    await new Promise((r) => setTimeout(r, 40));
+
+    db.transaction(() => {
+      db.rewindAfter(999);
+      db.headers.replaceAfter(999, [
+        {
+          height: forkRecord.height,
+          hashInternalHex: forkRecord.hashInternalHex,
+          header: hexToBytes(forkRecord.headerHex),
+        },
+      ]);
+    });
+    expect(db.filters.maxHeight()).toBeNull();
+
+    release();
+    await new Promise((r) => setTimeout(r, 120));
+
+    // 998/999 are still canonical; 1000 was replaced and must not persist.
+    expect(db.filters.get(998)).not.toBeNull();
+    expect(db.filters.get(999)).not.toBeNull();
+    expect(db.filters.get(1000)).toBeNull();
+
     await mod.stop();
     db.close();
   });

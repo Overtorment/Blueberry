@@ -14,9 +14,9 @@ import { createWalletTxsStore } from "../../src/tui/wallet-txs-store.ts";
 describe("TUI matching progress", () => {
   test("applyEvent updates get() before any subscribe", () => {
     const store = createMatchingProgressStore();
-    store.applyEvent({ at: 1000, matched: 340250, total: 412390 });
+    store.applyEvent({ at: 1000, scanned: 340250, total: 412390 });
     expect(store.get()).toMatchObject({
-      matched: 340250,
+      scanned: 340250,
       total: 412390,
       percent: 82,
     });
@@ -24,7 +24,7 @@ describe("TUI matching progress", () => {
 
   test("subscribe after applyEvent still sees seeded values", () => {
     const store = createMatchingProgressStore();
-    store.applyEvent({ at: 1000, matched: 10, total: 100 });
+    store.applyEvent({ at: 1000, scanned: 10, total: 100 });
     const before = store.get();
     let seen = 0;
     const unsub = store.subscribe(() => {
@@ -32,16 +32,16 @@ describe("TUI matching progress", () => {
     });
     // Same reference — useSyncExternalStore loops if subscribe reallocates.
     expect(store.get()).toBe(before);
-    expect(store.get()).toMatchObject({ matched: 10, total: 100 });
+    expect(store.get()).toMatchObject({ scanned: 10, total: 100 });
     expect(seen).toBe(0);
     unsub();
   });
 
   test("get() keeps referential equality when values unchanged", () => {
     const store = createMatchingProgressStore();
-    store.applyEvent({ at: 1000, matched: 10, total: 100 });
+    store.applyEvent({ at: 1000, scanned: 10, total: 100 });
     const a = store.get();
-    store.applyEvent({ at: 1000, matched: 10, total: 100 });
+    store.applyEvent({ at: 1000, scanned: 10, total: 100 });
     expect(store.get()).toBe(a);
   });
 
@@ -74,17 +74,17 @@ describe("TUI matching progress", () => {
     );
     tui.start();
     expect(matchingProgressStore.get()).toMatchObject({
-      matched: 1,
+      scanned: 1,
       total: 2,
       percent: 50,
     });
     bus.emit("matching:progress", {
       at: 2000,
-      matched: 2,
+      scanned: 2,
       total: 2,
     });
     expect(matchingProgressStore.get()).toMatchObject({
-      matched: 2,
+      scanned: 2,
       total: 2,
       percent: 100,
       etaMs: 0,
@@ -96,32 +96,32 @@ describe("TUI matching progress", () => {
   test("ETA ignores seed→first-progress dead time", () => {
     const store = createMatchingProgressStore();
     // Seed (TUI start) — long gap before matching actually advances.
-    store.applyEvent({ at: 1000, matched: 1000, total: 5000 });
+    store.applyEvent({ at: 1000, scanned: 1000, total: 5000 });
     expect(store.get().etaMs).toBeNull();
     // First advance after 120s idle must not arm lifetime rate from seed.
-    store.applyEvent({ at: 121_000, matched: 1100, total: 5000 });
+    store.applyEvent({ at: 121_000, scanned: 1100, total: 5000 });
     expect(store.get().etaMs).toBeNull();
     // Steady 100 filters / 100ms → 1/ms; remaining 3800 → 3800ms
-    store.applyEvent({ at: 121_100, matched: 1200, total: 5000 });
+    store.applyEvent({ at: 121_100, scanned: 1200, total: 5000 });
     expect(store.get().etaMs).toBe(3800);
   });
 
   test("ETA ignores completion→idle dead time when matching resumes", () => {
     const store = createMatchingProgressStore();
-    store.applyEvent({ at: 1000, matched: 500, total: 1000 });
-    store.applyEvent({ at: 2000, matched: 1000, total: 1000 });
+    store.applyEvent({ at: 1000, scanned: 500, total: 1000 });
+    store.applyEvent({ at: 2000, scanned: 1000, total: 1000 });
     expect(store.get().etaMs).toBe(0);
 
     // More filters arrive after a long idle; percent drops below 100.
-    store.applyEvent({ at: 1_000_000, matched: 1000, total: 5000 });
+    store.applyEvent({ at: 1_000_000, scanned: 1000, total: 5000 });
     expect(store.get().percent).toBe(20);
     expect(store.get().etaMs).toBeNull();
 
-    store.applyEvent({ at: 1_001_000, matched: 1100, total: 5000 });
+    store.applyEvent({ at: 1_001_000, scanned: 1100, total: 5000 });
     expect(store.get().etaMs).toBeNull();
 
     // Steady 100 / 1000ms from resume — not from completion timestamp.
-    store.applyEvent({ at: 1_002_000, matched: 1200, total: 5000 });
+    store.applyEvent({ at: 1_002_000, scanned: 1200, total: 5000 });
     expect(store.get().etaMs).toBe(38_000);
   });
 });

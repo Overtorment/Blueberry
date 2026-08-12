@@ -2,12 +2,14 @@ import { Block } from "bitcoinjs-lib";
 import { buildUtxoMap, netDeltasForTxs } from "../parse/balance.ts";
 import { extractWatchTxs } from "../parse/extract.ts";
 import { usedWatchIndexes } from "../parse/used-indexes.ts";
+import { inspectWalletBirthday } from "../wallet/birthday.ts";
 import type { Wallet } from "../wallet/wallet.ts";
 import {
   growWatchGapsIfNeeded,
   loadWatchGaps,
   saveWatchGaps,
 } from "../wallet/watch-gaps.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 const DEFAULT_BATCH_SIZE = 32;
@@ -115,9 +117,23 @@ export function createParseBlocksModule(
     const tip = ctx.db.headers.tip();
     const minH = ctx.db.headers.minHeight();
     const downloaded = ctx.db.filters.count();
+    // Same birthday-to-tip total as filters-download so TUI progress stays coherent.
+    const birthday = inspectWalletBirthday(ctx.db);
+    const filterFrom =
+      tip && minH !== null
+        ? birthday.status === "ok"
+          ? Math.max(birthday.height, minH)
+          : minH
+        : null;
     const total =
-      tip && minH !== null ? tip.height - minH + 1 : downloaded;
-    ctx.bus.emit("filters:progress", { at: now(), downloaded, total });
+      tip && filterFrom !== null
+        ? Math.max(0, tip.height - filterFrom + 1)
+        : downloaded;
+    ctx.bus.emit("filters:progress", {
+      at: now(),
+      downloaded: Math.min(downloaded, total),
+      total,
+    });
     needsRun = true;
   }
 
@@ -240,11 +256,15 @@ export function createParseBlocksModule(
         status: "running",
       });
 
-      loopPromise = (async () => {
-        await yieldOnce();
-        if (stopped) return;
-        await loop();
-      })();
+      loopPromise = detachLoop(
+        ctx,
+        "parse-blocks",
+        (async () => {
+          await yieldOnce();
+          if (stopped) return;
+          await loop();
+        })(),
+      );
     },
     async stop() {
       if (stopped) return;

@@ -153,6 +153,8 @@ export type DownloadedBlock = {
 export interface MatchedBlocksRepository {
   /** Insert if missing; returns true when a new row was written. */
   insert(block: MatchedBlock): boolean;
+  /** Current match at height, or null if none. */
+  get(height: number): MatchedBlock | null;
   count(): number;
   /** Matched heights with no row in `blocks`, lowest height first. */
   listNeedingDownload(limit: number): MatchedBlock[];
@@ -205,5 +207,17 @@ export interface Database {
   transactions: TransactionsRepository;
   keyValue: KeyValueRepository;
   utxoNames: UtxoNamesRepository;
+  /** Run fn in one SQLite transaction (nested calls join the open tx). */
+  transaction(fn: () => void): void;
+  /** Delete height-dependent chain rows with height > ancestorHeight. */
+  rewindAfter(ancestorHeight: number): void;
+  /**
+   * Delete filters and filter headers with height >= height in one transaction.
+   * Optional prevHeaderHeight also deletes that exact filter-header row.
+   */
+  wipeFiltersFrom(
+    height: number,
+    options?: { prevHeaderHeight?: number },
+  ): void;
   close(): void;
 }

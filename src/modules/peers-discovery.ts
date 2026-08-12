@@ -8,6 +8,7 @@ import {
 } from "../net/dns-seeds.ts";
 import { probePeer, type ProbeResult } from "../net/peer-probe.ts";
 import type { PlatformNet } from "../net/types.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 export type PeersDiscoveryOptions = {
@@ -250,10 +251,10 @@ export function createPeersDiscoveryModule(
       // (and filters-matching) when the peer table is empty.
       void bootstrap()
         .then(() => {
-          if (!stopped) void runLoop();
+          if (!stopped) void detachLoop(ctx, "peers-discovery", runLoop());
         })
         .catch(() => {
-          if (!stopped) void runLoop();
+          if (!stopped) void detachLoop(ctx, "peers-discovery", runLoop());
         });
       ctx.bus.emit("module:status", {
         module: "peers-discovery",

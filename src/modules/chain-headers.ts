@@ -30,6 +30,7 @@ import {
   type HeaderSessionPool,
 } from "../net/header-sync.ts";
 import type { PlatformNet } from "../net/types.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 export type ChainHeadersOptions = {
@@ -111,8 +112,14 @@ function persistBranch(
     header: hexToBytes(record.headerHex),
     cumulativeWork: branch.cumulativeWorkByHeight.get(record.height)!,
   }));
-  if (mode === "append") ctx.db.headers.append(writes);
-  else ctx.db.headers.replaceAfter(ancestorHeight, writes);
+  if (mode === "append") {
+    ctx.db.headers.append(writes);
+    return;
+  }
+  ctx.db.transaction(() => {
+    ctx.db.rewindAfter(ancestorHeight);
+    ctx.db.headers.replaceAfter(ancestorHeight, writes);
+  });
 }
 
 /** Extend/replace an in-memory validated chain after a successful branch apply. */
@@ -563,7 +570,7 @@ export function createChainHeadersModule(
         if (quiet) return;
         kick();
       });
-      void runLoop();
+      void detachLoop(ctx, "chain-headers", runLoop());
       ctx.bus.emit("module:status", {
         module: "chain-headers",
         status: "running",

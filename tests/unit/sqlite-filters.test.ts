@@ -1,9 +1,24 @@
 import { describe, expect, test } from "bun:test";
+import { Database as BunDatabase } from "bun:sqlite";
 import { hexToBytes } from "bitcoin-headers";
 import { checkpointDbRecord, checkpointSeedRecord } from "../../src/checkpoint.ts";
+import { ensureSchema } from "../../src/db/schema.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 
 describe("SqliteDatabase filters", () => {
+  test("schema creates a covering filter metadata index", () => {
+    const raw = new BunDatabase(":memory:");
+    ensureSchema(raw);
+    const columns = raw
+      .query("PRAGMA index_info('filters_height_hash')")
+      .all() as Array<{ seqno: number; name: string }>;
+    expect(columns.map((column) => column.name)).toEqual([
+      "height",
+      "block_hash_internal_hex",
+    ]);
+    raw.close();
+  });
+
   test("filters.filter round-trips as blob bytes", () => {
     const db = createSqliteDatabase(":memory:");
     const bytes = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
@@ -40,6 +55,37 @@ describe("SqliteDatabase filters", () => {
     ]);
     db.filterHeaders.deleteFrom(11);
     expect(db.filterHeaders.tip()?.height).toBe(10);
+    db.close();
+  });
+
+  test("wipeFiltersFrom removes filters and filter headers atomically", () => {
+    const db = createSqliteDatabase(":memory:");
+    db.filterHeaders.append([
+      { height: 9, header: hexToBytes("09".repeat(32)) },
+      { height: 10, header: hexToBytes("0a".repeat(32)) },
+      { height: 11, header: hexToBytes("0b".repeat(32)) },
+    ]);
+    db.filters.append([
+      {
+        height: 10,
+        blockHashInternalHex: "0a".repeat(32),
+        filter: new Uint8Array([1]),
+      },
+      {
+        height: 11,
+        blockHashInternalHex: "0b".repeat(32),
+        filter: new Uint8Array([2]),
+      },
+    ]);
+
+    db.wipeFiltersFrom(10, { prevHeaderHeight: 9 });
+
+    expect(db.filters.get(10)).toBeNull();
+    expect(db.filters.get(11)).toBeNull();
+    expect(db.filters.count()).toBe(0);
+    expect(db.filterHeaders.get(9)).toBeNull();
+    expect(db.filterHeaders.get(10)).toBeNull();
+    expect(db.filterHeaders.tip()).toBeNull();
     db.close();
   });
 

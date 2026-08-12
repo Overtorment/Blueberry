@@ -5,8 +5,8 @@ describe("MessageBus", () => {
   test("delivers payload to subscribers", () => {
     const bus = createMessageBus();
     const seen: unknown[] = [];
-    bus.on("app:started", (p) => seen.push(p));
-    bus.emit("app:started", { at: 42 });
+    bus.on("peers:updated", (p) => seen.push(p));
+    bus.emit("peers:updated", { at: 42 });
     expect(seen).toEqual([{ at: 42 }]);
   });
 
@@ -31,21 +31,21 @@ describe("MessageBus", () => {
   test("handler errors do not block other listeners", () => {
     const bus = createMessageBus();
     const seen: string[] = [];
-    bus.on("app:started", () => {
+    bus.on("peers:updated", () => {
       throw new Error("boom");
     });
-    bus.on("app:started", (p) => {
+    bus.on("peers:updated", (p) => {
       seen.push(String(p.at));
     });
-    expect(() => bus.emit("app:started", { at: 1 })).not.toThrow();
+    expect(() => bus.emit("peers:updated", { at: 1 })).not.toThrow();
     expect(seen).toEqual(["1"]);
   });
 
-  test("delivers peers:updated", () => {
+  test("delivers sync:idle", () => {
     const bus = createMessageBus();
     const seen: number[] = [];
-    bus.on("peers:updated", (p) => seen.push(p.at));
-    bus.emit("peers:updated", { at: 99 });
+    bus.on("sync:idle", (p) => seen.push(p.at));
+    bus.emit("sync:idle", { at: 99 });
     expect(seen).toEqual([99]);
   });
 });

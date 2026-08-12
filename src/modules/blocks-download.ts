@@ -13,6 +13,7 @@ import {
 } from "../net/block-sync.ts";
 import { formatError } from "../net/format-error.ts";
 import type { PlatformNet } from "../net/types.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 /** Bitcoin NODE_NETWORK — peer can serve historical blocks. */
@@ -183,6 +184,17 @@ export function createBlocksDownloadModule(
       assertBlockPayload(payload, hashDisplay);
       const blockBytes = encodeBlock(payload);
       phase = "persist";
+      // Reorg may have dropped/replaced this match while getBlock was in flight.
+      const matched = ctx.db.matchedBlocks.get(job.height);
+      if (
+        !matched ||
+        matched.blockHashInternalHex !== job.blockHashInternalHex
+      ) {
+        diagnosticLog(
+          `block discarded stale attempt=${attempt} peer=${peerKey(peer)} height=${job.height} elapsedMs=${Math.max(0, now() - startedAt)}`,
+        );
+        return false;
+      }
       const inserted = ctx.db.blocks.insert({
         height: job.height,
         blockHashInternalHex: job.blockHashInternalHex,
@@ -307,7 +319,7 @@ export function createBlocksDownloadModule(
         if (quiet) return;
         kick();
       });
-      loopPromise = loop();
+      loopPromise = detachLoop(ctx, "blocks-download", loop());
       ctx.bus.emit("module:status", {
         module: "blocks-download",
         status: "running",

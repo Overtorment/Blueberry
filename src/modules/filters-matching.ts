@@ -5,6 +5,7 @@ import {
 } from "../match/scan.ts";
 import type { WatchGaps } from "../wallet/derive.ts";
 import type { Wallet } from "../wallet/wallet.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 const IDLE_POLL_MS = 1_000;
@@ -39,7 +40,7 @@ export function createFiltersMatchingModule(
   let unsubProgress: (() => void) | undefined;
   let loopPromise: Promise<void> | undefined;
   let loadedGaps: WatchGaps | undefined;
-  let matchedCount = 0;
+  let scannedCount = 0;
   let totalCount = 0;
 
   function kick() {
@@ -69,13 +70,13 @@ export function createFiltersMatchingModule(
   function emitProgress(): void {
     ctx.bus.emit("matching:progress", {
       at: Date.now(),
-      matched: matchedCount,
+      scanned: scannedCount,
       total: totalCount,
     });
   }
 
   function seedProgress(): void {
-    matchedCount = ctx.db.filters.countScanned();
+    scannedCount = ctx.db.filters.countScanned();
     totalCount = ctx.db.filters.count();
     emitProgress();
   }
@@ -109,8 +110,8 @@ export function createFiltersMatchingModule(
               ctx.bus.emit("filters:match", m);
             },
             onProgress: (p) => {
-              if (p.matched === matchedCount && p.total === totalCount) return;
-              matchedCount = p.matched;
+              if (p.scanned === scannedCount && p.total === totalCount) return;
+              scannedCount = p.scanned;
               totalCount = p.total;
               emitProgress();
             },
@@ -180,11 +181,15 @@ export function createFiltersMatchingModule(
         module: "filters-matching",
         status: "running",
       });
-      loopPromise = (async () => {
-        await yieldOnce();
-        if (stopped) return;
-        await loop();
-      })();
+      loopPromise = detachLoop(
+        ctx,
+        "filters-matching",
+        (async () => {
+          await yieldOnce();
+          if (stopped) return;
+          await loop();
+        })(),
+      );
     },
     async stop() {
       if (stopped) return;

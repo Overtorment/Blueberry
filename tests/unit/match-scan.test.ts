@@ -123,7 +123,7 @@ describe("scanFiltersForMatches", () => {
     db.close();
   });
 
-  test("progress matched tracks countScanned after mid-scan re-queue", async () => {
+  test("progress scanned tracks countScanned after mid-scan re-queue", async () => {
     const db = createSqliteDatabase(":memory:");
     const wallet = deriveWatchWallet(MNEMONIC, 4);
     const junk = new Uint8Array([0x00, 0x14, ...new Uint8Array(20).fill(0xab)]);
@@ -131,7 +131,7 @@ describe("scanFiltersForMatches", () => {
       append(db, h, h.toString(16).padStart(2, "0").repeat(32), [junk]);
     }
 
-    const progress: Array<{ matched: number; total: number }> = [];
+    const progress: Array<{ scanned: number; total: number }> = [];
     let requeued = false;
     await scanFiltersForMatches(
       db,
@@ -152,9 +152,9 @@ describe("scanFiltersForMatches", () => {
     );
 
     for (const p of progress) {
-      expect(p.matched).toBeLessThanOrEqual(p.total);
+      expect(p.scanned).toBeLessThanOrEqual(p.total);
     }
-    expect(progress.at(-1)).toEqual({ matched: 6, total: 6 });
+    expect(progress.at(-1)).toEqual({ scanned: 6, total: 6 });
     db.close();
   });
 });

@@ -3,11 +3,12 @@ import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
 import { resolveOnboardingGate } from "./boot/onboarding-gate.ts";
 import { reexecSelf } from "./boot/reexec.ts";
+import { installFatalUnhandledRejection } from "./boot/unhandled-rejection.ts";
 import { consensusForYear } from "./checkpoint.ts";
 import { createMessageBus } from "./bus/message-bus.ts";
 import { createSqliteDatabase } from "./db/sqlite-database.ts";
 import type { Database } from "./db/types.ts";
-import { initFileLog, log } from "./log.ts";
+import { initFileLog, log, logError } from "./log.ts";
 import { createBlocksDownloadModule } from "./modules/blocks-download.ts";
 import { createChainHeadersModule } from "./modules/chain-headers.ts";
 import { createFiltersDownloadModule } from "./modules/filters-download.ts";
@@ -60,99 +61,111 @@ import { createWallet } from "./wallet/wallet.ts";
 mkdirSync("./blueberry.data", { recursive: true });
 initFileLog("./blueberry.data/blueberry.log");
 log("main", "boot");
-const db = createSqliteDatabase("./blueberry.data/blueberry.sqlite");
 
-const gate = resolveOnboardingGate(
-  inspectWalletSecret(db),
-  inspectSyncFromYear(db),
-);
+installFatalUnhandledRejection({
+  onRejection: (reason) => logError("main", "unhandledRejection", reason),
+  exit: (code) => process.reallyExit(code),
+});
 
-if (gate.action === "exit-invalid") {
-  console.error(`wallet_secret is present but invalid: ${gate.detail}`);
-  console.error(
-    "Fix or delete the wallet_secret key in the database, then restart.",
+try {
+  const db = createSqliteDatabase("./blueberry.data/blueberry.sqlite");
+
+  const gate = resolveOnboardingGate(
+    inspectWalletSecret(db),
+    inspectSyncFromYear(db),
   );
+
+  if (gate.action === "exit-invalid") {
+    console.error(`wallet_secret is present but invalid: ${gate.detail}`);
+    console.error(
+      "Fix or delete the wallet_secret key in the database, then restart.",
+    );
+    process.reallyExit(1);
+  }
+
+  if (gate.action === "onboard") {
+    const renderer = await createCliRenderer({
+      exitOnCtrlC: false,
+      exitSignals: [],
+      useMouse: false,
+    });
+
+    function quitOnboarding(code: number, err?: unknown): void {
+      try {
+        renderer.destroy();
+      } catch {
+        /* ignore */
+      }
+      if (err !== undefined) console.error(err);
+      process.reallyExit(code);
+    }
+
+    function finishOnboarding(): void {
+      try {
+        root.unmount();
+      } catch {
+        /* ignore */
+      }
+      try {
+        renderer.destroy();
+      } catch {
+        /* ignore */
+      }
+      try {
+        db.close();
+      } catch {
+        /* ignore */
+      }
+      reexecSelf();
+    }
+
+    const root = createRoot(renderer);
+    root.render(
+      <OnboardingApp
+        startAtYearStep={gate.startAtYearStep}
+        onSecretValidated={(raw) => {
+          try {
+            saveWalletSecret(db, raw);
+          } catch (err) {
+            quitOnboarding(1, err);
+            return;
+          }
+        }}
+        onWalletCreated={(raw) => {
+          try {
+            saveWalletSecret(db, raw);
+            saveSyncFromYear(db, latestCheckpointYear());
+            markWalletBirthdayPending(db);
+          } catch (err) {
+            quitOnboarding(1, err);
+            return;
+          }
+          finishOnboarding();
+        }}
+        onYearChosen={(year) => {
+          try {
+            saveSyncFromYear(db, year);
+          } catch (err) {
+            quitOnboarding(1, err);
+            return;
+          }
+          finishOnboarding();
+        }}
+      />,
+    );
+
+    renderer.keyInput.on("keypress", (key) => {
+      if (key.ctrl && key.name === "c") quitOnboarding(0);
+    });
+    process.once("SIGINT", () => quitOnboarding(0));
+    process.once("SIGTERM", () => quitOnboarding(0));
+  } else {
+    await startApp(db);
+  }
+} catch (err) {
+  logError("main", "fatal boot", err);
+  console.error(err instanceof Error ? err.message : String(err));
   process.reallyExit(1);
-}
-
-if (gate.action === "onboard") {
-  const renderer = await createCliRenderer({
-    exitOnCtrlC: false,
-    exitSignals: [],
-    useMouse: false,
-  });
-
-  function quitOnboarding(code: number, err?: unknown): void {
-    try {
-      renderer.destroy();
-    } catch {
-      /* ignore */
-    }
-    if (err !== undefined) console.error(err);
-    process.reallyExit(code);
-  }
-
-  function finishOnboarding(): void {
-    try {
-      root.unmount();
-    } catch {
-      /* ignore */
-    }
-    try {
-      renderer.destroy();
-    } catch {
-      /* ignore */
-    }
-    try {
-      db.close();
-    } catch {
-      /* ignore */
-    }
-    reexecSelf();
-  }
-
-  const root = createRoot(renderer);
-  root.render(
-    <OnboardingApp
-      startAtYearStep={gate.startAtYearStep}
-      onSecretValidated={(raw) => {
-        try {
-          saveWalletSecret(db, raw);
-        } catch (err) {
-          quitOnboarding(1, err);
-          return;
-        }
-      }}
-      onWalletCreated={(raw) => {
-        try {
-          saveWalletSecret(db, raw);
-          saveSyncFromYear(db, latestCheckpointYear());
-          markWalletBirthdayPending(db);
-        } catch (err) {
-          quitOnboarding(1, err);
-          return;
-        }
-        finishOnboarding();
-      }}
-      onYearChosen={(year) => {
-        try {
-          saveSyncFromYear(db, year);
-        } catch (err) {
-          quitOnboarding(1, err);
-          return;
-        }
-        finishOnboarding();
-      }}
-    />,
-  );
-
-  renderer.keyInput.on("keypress", (key) => {
-    if (key.ctrl && key.name === "c") quitOnboarding(0);
-  });
-  process.once("SIGINT", () => quitOnboarding(0));
-  process.once("SIGTERM", () => quitOnboarding(0));
-} else {
-  await startApp(db);
 }
 
 async function startApp(db: Database): Promise<void> {
@@ -239,23 +252,15 @@ async function startApp(db: Database): Promise<void> {
   });
   createRoot(renderer).render(<App />);
 
+  // Yield one frame so the first TUI paint lands before sync CPU work.
   await new Promise<void>((resolve) => {
     const t = setTimeout(resolve, 16);
     t.unref?.();
   });
 
-  // Re-seed after mount in case the first paint raced the store subscription.
-  matchingProgressStore.applyEvent({
-    at: Date.now(),
-    matched: db.filters.countScanned(),
-    total: db.filters.count(),
-  });
-
   for (const mod of domainModules) {
     void startModule(mod);
   }
-
-  bus.emit("app:started", { at: Date.now() });
 
   let shuttingDown = false;
 

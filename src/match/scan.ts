@@ -15,7 +15,7 @@ export const MATCH_BATCH_GAP_MS = 0;
 
 export type MatchScanCallbacks = {
   onMatch?: (m: { height: number; blockHashInternalHex: string }) => void;
-  onProgress?: (p: { matched: number; total: number }) => void;
+  onProgress?: (p: { scanned: number; total: number }) => void;
 };
 
 export type MatchScanOptions = {
@@ -62,12 +62,12 @@ export async function scanFiltersForMatches(
   const shouldContinue = options?.shouldContinue;
 
   let total = db.filters.count();
-  let matched = db.filters.countScanned();
+  let scanned = db.filters.countScanned();
   let advanced = 0;
 
   const emitProgress = () => {
     total = db.filters.count();
-    callbacks?.onProgress?.({ matched, total });
+    callbacks?.onProgress?.({ scanned, total });
   };
 
   const pause = async () => {
@@ -124,8 +124,8 @@ export async function scanFiltersForMatches(
 
       db.filters.markScanned(heights);
       // Re-read: markUnscannedFrom (gap growth) can re-queue mid-scan; a
-      // monotonic matched++ would then report matched > total.
-      matched = db.filters.countScanned();
+      // monotonic scanned++ would then report scanned > total.
+      scanned = db.filters.countScanned();
       emitProgress();
       await pause();
     }

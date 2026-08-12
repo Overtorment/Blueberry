@@ -19,6 +19,7 @@ import {
 } from "../net/filter-sync.ts";
 import type { PlatformNet } from "../net/types.ts";
 import { formatError } from "../net/format-error.ts";
+import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 export type FiltersDownloadOptions = {
@@ -180,11 +181,12 @@ export function createFiltersDownloadModule(
   }
 
   function wipeFilterTablesFrom(height: number, rangeFrom: number): void {
-    ctx.db.filters.deleteFrom(height);
-    ctx.db.filterHeaders.deleteFrom(height);
-    if (height === rangeFrom && rangeFrom > 0) {
-      ctx.db.filterHeaders.deleteFrom(rangeFrom - 1);
-    }
+    ctx.db.wipeFiltersFrom(
+      height,
+      height === rangeFrom && rangeFrom > 0
+        ? { prevHeaderHeight: rangeFrom - 1 }
+        : undefined,
+    );
     hashCheckedThrough = Math.min(hashCheckedThrough, height - 1);
   }
 
@@ -333,10 +335,11 @@ export function createFiltersDownloadModule(
             }
             const stopRow = ctx.db.headers.get(claim.to);
             if (!stopRow) throw new Error("missing stop header");
+            const stopHashInternalHex = stopRow.hashInternalHex;
 
             const response = await session.getCFHeaders(
               claim.from,
-              hexToBytes(stopRow.hashInternalHex),
+              hexToBytes(stopHashInternalHex),
             );
             const derived = verifyCfHeadersBatch(
               chainFrom,
@@ -347,6 +350,15 @@ export function createFiltersDownloadModule(
               checkpointCache.map,
             );
             if (!derived) throw new Error("cfheaders verification failed");
+
+            // Reorg may have replaced the stop hash while getCFHeaders was in flight.
+            const stopNow = ctx.db.headers.get(claim.to);
+            if (
+              !stopNow ||
+              stopNow.hashInternalHex !== stopHashInternalHex
+            ) {
+              throw new Error("stale cfheaders stop hash after reorg");
+            }
 
             const rows: Array<{ height: number; header: Uint8Array }> = [];
             if (claim.from === chainFrom && chainFrom > 0) {
@@ -430,9 +442,22 @@ export function createFiltersDownloadModule(
     const flushVerified = () => {
       if (toStore.length === 0) return;
       const rows = toStore.splice(0);
-      ctx.db.filters.append(rows);
-      saved += rows.length;
-      haveCached += rows.length;
+      // Reorg may have replaced headers while getCFilters was in flight;
+      // keep only rows whose block hash is still canonical.
+      const canonical = rows.filter(
+        (row) =>
+          ctx.db.headers.get(row.height)?.hashInternalHex ===
+          row.blockHashInternalHex,
+      );
+      if (canonical.length < rows.length) {
+        diagnosticLog(
+          `filter flush dropped stale range=${range.from}-${range.to} dropped=${rows.length - canonical.length}`,
+        );
+      }
+      if (canonical.length === 0) return;
+      ctx.db.filters.append(canonical);
+      saved += canonical.length;
+      haveCached += canonical.length;
       emitProgress(chainFrom, tipTo, false);
     };
 
@@ -705,7 +730,7 @@ export function createFiltersDownloadModule(
       busy = false;
       if (needsRun && !stopped) {
         needsRun = false;
-        void runDownload();
+        void detachLoop(ctx, "filters-download", runDownload());
       }
     }
   }
@@ -717,7 +742,7 @@ export function createFiltersDownloadModule(
       kick();
       return;
     }
-    void runDownload();
+    void detachLoop(ctx, "filters-download", runDownload());
   }
 
   return {
