@@ -128,4 +128,22 @@ describe("extractWatchTxs", () => {
       ),
     ).toHaveLength(1);
   });
+
+  test("ignores spends unlocked by an unrelated pubkey", () => {
+    const watched = p2pkh(watchKey0()).script!;
+    const other = new Uint8Array(33).fill(3);
+    other[0] = 0x02;
+    const spend = new Transaction();
+    spend.version = 2;
+    spend.addInput(new Uint8Array(32).fill(1), 0);
+    spend.setInputScript(
+      0,
+      bscript.compile([Buffer.alloc(71, 2), Buffer.from(other)]),
+    );
+    spend.setWitness(0, [new Uint8Array(64), other]);
+    spend.addOutput(new Uint8Array([0x00, 0x14, ...new Uint8Array(20)]), 900n);
+    expect(
+      extractWatchTxs(wrapBlock([spend]), [new Uint8Array(watched)], new Map()),
+    ).toHaveLength(0);
+  });
 });

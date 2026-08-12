@@ -51,17 +51,17 @@ describe("usedWatchIndexes", () => {
 
   test("detects P2PKH spend via scriptSig without prior receive", () => {
     const root = HDKey.fromMasterSeed(mnemonicToSeedSync(MNEMONIC));
-    const pubkey = root.derive("m/84'/0'/0'/0/2").publicKey!;
-    const { script } = p2pkh(pubkey);
+    const pubkey = root.derive("m/84'/0'/0'/0/0").publicKey!;
+    const { script, address } = p2pkh(pubkey);
     const wallet: WatchWallet = {
       kind: "address",
-      secret: "legacy",
+      secret: address!,
       addresses: [
         {
-          path: "address/2",
-          index: 2,
+          path: "address/0",
+          index: 0,
           change: false,
-          address: "legacy",
+          address: address!,
           scriptPubKey: new Uint8Array(script),
           scriptType: "p2pkh",
         },
@@ -79,7 +79,7 @@ describe("usedWatchIndexes", () => {
     spend.addOutput(new Uint8Array([0x00, 0x14, ...new Uint8Array(20)]), 1n);
 
     const used = usedWatchIndexes([{ tx: spend.toBuffer() }], wallet);
-    expect(used.external).toEqual([2]);
+    expect(used.external).toEqual([0]);
   });
 
   test("detects spend via prevout in same batch without witness", () => {

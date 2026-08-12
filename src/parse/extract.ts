@@ -19,12 +19,12 @@ export function p2wpkhScriptFromPubkey(pubkey: Uint8Array): Uint8Array {
   return new Uint8Array([0x00, 0x14, ...h]);
 }
 
-export function p2pkhScriptFromPubkey(pubkey: Uint8Array): Uint8Array {
+function p2pkhScriptFromPubkey(pubkey: Uint8Array): Uint8Array {
   const h = crypto.hash160(pubkey);
   return new Uint8Array([0x76, 0xa9, 0x14, ...h, 0x88, 0xac]);
 }
 
-export function p2shP2wpkhScriptFromPubkey(pubkey: Uint8Array): Uint8Array {
+function p2shP2wpkhScriptFromPubkey(pubkey: Uint8Array): Uint8Array {
   const redeemHash = crypto.hash160(p2wpkhScriptFromPubkey(pubkey));
   return new Uint8Array([0xa9, 0x14, ...redeemHash, 0x87]);
 }
@@ -34,9 +34,7 @@ function isPubkeyBytes(value: Uint8Array): boolean {
 }
 
 /** Best-effort pubkey from a legacy scriptSig (`<sig> <pubkey>`). */
-export function pubkeyFromScriptSig(
-  scriptSig: Uint8Array,
-): Uint8Array | null {
+function pubkeyFromScriptSig(scriptSig: Uint8Array): Uint8Array | null {
   try {
     const chunks = bscript.decompile(Buffer.from(scriptSig));
     if (!chunks) return null;
