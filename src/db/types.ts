@@ -166,15 +166,6 @@ export interface BlocksRepository {
   insert(block: DownloadedBlock): boolean;
   /** Downloaded blocks with no row in `parsed_blocks`, lowest height first. */
   listNeedingParse(limit: number): DownloadedBlock[];
-  /**
-   * Heights strictly above `afterHeight` whose block blob contains the outpoint
-   * bytes (internal-byte-order txid || LE vout). Used to find missed spends.
-   */
-  findHeightsContainingOutpoint(
-    txidDisplay: string,
-    vout: number,
-    afterHeight: number,
-  ): number[];
 }
 
 export type StoredTx = {
@@ -192,8 +183,6 @@ export interface ParsedBlocksRepository {
   count(): number;
   /** Drop parsed markers for height >= fromHeight (re-parse with expanded watch). */
   clearFrom(fromHeight: number): void;
-  /** Drop a single parsed marker so that height can be re-parsed. */
-  clear(height: number): void;
 }
 
 export interface TransactionsRepository {

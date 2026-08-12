@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Block, Transaction } from "bitcoinjs-lib";
-import { p2pkh, p2wpkh } from "@scure/btc-signer";
+import { p2wpkh } from "@scure/btc-signer";
 import { HDKey } from "@scure/bip32";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import { createMessageBus } from "../../src/bus/message-bus.ts";
@@ -8,7 +8,6 @@ import { config } from "../../src/config.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 import { createParseBlocksModule } from "../../src/modules/parse-blocks.ts";
 import { createWallet } from "../../src/wallet/wallet.ts";
-import { buildUtxoMap } from "../../src/parse/balance.ts";
 
 const MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -328,93 +327,6 @@ describe("parse-blocks", () => {
 
     bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => db.parsedBlocks.has(2));
-
-    await mod.stop();
-    db.close();
-  });
-
-  test("sync:idle requeues missed spend blocks and corrects balance", async () => {
-    const bus = createMessageBus();
-    const db = createSqliteDatabase(":memory:");
-    const root = HDKey.fromMasterSeed(mnemonicToSeedSync(MNEMONIC));
-    const pubkey = root.derive("m/84'/0'/0'/0/0").publicKey!;
-    const { script, address } = p2pkh(pubkey);
-    const watch = new Uint8Array(script!);
-
-    const receive = new Transaction();
-    receive.version = 2;
-    receive.addInput(Buffer.alloc(32), 0xffffffff);
-    receive.addOutput(watch, 50_000n);
-
-    const spend = new Transaction();
-    spend.version = 2;
-    spend.addInput(
-      new Uint8Array(Buffer.from(receive.getId(), "hex").reverse()),
-      0,
-    );
-    spend.addOutput(new Uint8Array([0x00, 0x14, ...new Uint8Array(20)]), 49_000n);
-
-    const receiveBlock = new Block();
-    receiveBlock.version = 1;
-    receiveBlock.prevHash = new Uint8Array(32);
-    receiveBlock.merkleRoot = Block.calculateMerkleRoot([receive]);
-    receiveBlock.timestamp = 0;
-    receiveBlock.bits = 0;
-    receiveBlock.nonce = 0;
-    receiveBlock.transactions = [receive];
-
-    const spendBlock = new Block();
-    spendBlock.version = 1;
-    spendBlock.prevHash = new Uint8Array(32);
-    spendBlock.merkleRoot = Block.calculateMerkleRoot([spend]);
-    spendBlock.timestamp = 0;
-    spendBlock.bits = 0;
-    spendBlock.nonce = 0;
-    spendBlock.transactions = [spend];
-
-    db.blocks.insert({
-      height: 10,
-      blockHashInternalHex: "aa".repeat(32),
-      block: receiveBlock.toBuffer(),
-    });
-    db.blocks.insert({
-      height: 20,
-      blockHashInternalHex: "bb".repeat(32),
-      block: spendBlock.toBuffer(),
-    });
-    db.parsedBlocks.mark(10);
-    db.parsedBlocks.mark(20);
-    db.transactions.upsert({
-      txid: receive.getId(),
-      height: 10,
-      txIndex: 0,
-      blockHashInternalHex: "aa".repeat(32),
-      tx: receive.toBuffer(),
-      netDeltaSats: 50_000,
-    });
-
-    const wallet = createWallet(db, { secret: address! });
-    const mod = createParseBlocksModule(
-      { bus, db },
-      { wallet, idleDelayMs: 50, blockGapMs: 0 },
-    );
-    await mod.start();
-    bus.emit("sync:idle", { at: Date.now() });
-    await waitFor(() => db.transactions.count() === 2);
-
-    const utxos = buildUtxoMap(
-      db.transactions.list().map((t) => ({
-        txid: t.txid,
-        height: t.height,
-        txIndex: t.txIndex,
-        tx: t.tx,
-      })),
-      wallet.scripts(),
-    );
-    expect(utxos.size).toBe(0);
-    expect(
-      db.transactions.list().reduce((s, t) => s + t.netDeltaSats, 0),
-    ).toBe(0);
 
     await mod.stop();
     db.close();
