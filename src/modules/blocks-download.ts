@@ -55,6 +55,7 @@ export function createBlocksDownloadModule(
     1,
     options.concurrency ?? config.blockConcurrency,
   );
+  const idleDelayMs = Math.max(0, options.idleDelayMs ?? 500);
   const now = options.now ?? Date.now;
   const diagnosticLog =
     options.log ?? ((message: string) => writeLog("blocks-download", message));
@@ -67,7 +68,6 @@ export function createBlocksDownloadModule(
   let unsubCatchup: (() => void) | undefined;
   let loopPromise: Promise<void> | undefined;
   let lastEmitAt = 0;
-  let peerCursor = 0;
   let lastQueueDiagnostic = "";
   let attemptSequence = 0;
 
@@ -96,6 +96,7 @@ export function createBlocksDownloadModule(
         resolve();
       };
       const timer = setTimeout(done, ms);
+      timer.unref?.();
       waiters.add(done);
     });
   }
@@ -136,12 +137,11 @@ export function createBlocksDownloadModule(
         return !leasedPeers.has(key) && !peerCoolUntil.has(key);
       });
     if (candidates.length === 0) return null;
-    // Rotate so we don't hammer the same dead prefix of listAlive forever.
-    const idx = peerCursor % candidates.length;
-    peerCursor++;
+    // First remaining unused/unleased/uncooled peer. Cooldown already skips a
+    // dead prefix of ORDER BY host, port — no extra cursor needed.
     const peer = {
-      host: candidates[idx]!.host,
-      port: candidates[idx]!.port,
+      host: candidates[0]!.host,
+      port: candidates[0]!.port,
     };
     leasedPeers.add(peerKey(peer));
     return peer;
@@ -161,22 +161,24 @@ export function createBlocksDownloadModule(
   ): Promise<boolean> {
     const startedAt = now();
     const attempt = ++attemptSequence;
-    diagnosticLog(`block start attempt=${attempt} peer=${peerKey(peer)}`);
-    const opened = await openSession(peer.host, peer.port, {
-      connect: options.net.connect,
-      connectTimeoutMs,
-      syncTimeoutMs,
-    });
-    if (!opened.ok) {
-      coolPeer(peer);
-      diagnosticLog(
-        `session open failure attempt=${attempt} peer=${peerKey(peer)} elapsedMs=${Math.max(0, now() - startedAt)} cooldownMs=${PEER_COOL_MS} error=${formatError(opened.error)}`,
-      );
-      return false;
-    }
-    const session: BlockSessionApi = opened.value;
-    let phase = "download";
+    let session: BlockSessionApi | undefined;
+    let phase = "session";
     try {
+      diagnosticLog(`block start attempt=${attempt} peer=${peerKey(peer)}`);
+      const opened = await openSession(peer.host, peer.port, {
+        connect: options.net.connect,
+        connectTimeoutMs,
+        syncTimeoutMs,
+      });
+      if (!opened.ok) {
+        coolPeer(peer);
+        diagnosticLog(
+          `session open failure attempt=${attempt} peer=${peerKey(peer)} elapsedMs=${Math.max(0, now() - startedAt)} cooldownMs=${PEER_COOL_MS} error=${formatError(opened.error)}`,
+        );
+        return false;
+      }
+      session = opened.value;
+      phase = "download";
       const hashInternal = hexToBytes(job.blockHashInternalHex);
       const payload = await session.getBlock(hashInternal);
       phase = "validate";
@@ -215,10 +217,12 @@ export function createBlocksDownloadModule(
       );
       return false;
     } finally {
-      try {
-        await session.close();
-      } catch {
-        // ignore
+      if (session) {
+        try {
+          await session.close();
+        } catch {
+          // ignore
+        }
       }
     }
   }
@@ -246,14 +250,14 @@ export function createBlocksDownloadModule(
     emitProgress(true);
     while (!stopped) {
       const pending = ctx.db.matchedBlocks
-        .listNeedingDownload(10_000)
+        .listNeedingDownload(concurrency)
         .filter((j) => !inFlight.has(j.height));
 
       if (pending.length === 0 && inFlight.size === 0) {
         lastQueueDiagnostic = "";
         // Idle: wake on filters:match / peers:updated, and poll DB periodically
-        // so a missed kick cannot stall forever (wait ~500ms).
-        await waitForKick(PEER_WAIT_MS);
+        // so a missed kick cannot stall forever.
+        await waitForKick(idleDelayMs);
         continue;
       }
 
@@ -285,6 +289,12 @@ export function createBlocksDownloadModule(
         waitForKick(PEER_WAIT_MS),
       ]);
       emitProgress();
+      // Instant session failures resolve inFlight via microtasks and can
+      // starve timers; always yield a macrotask between busy iterations.
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 0);
+        t.unref?.();
+      });
     }
 
     if (inFlight.size > 0) {

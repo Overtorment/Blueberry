@@ -545,6 +545,77 @@ describe("blocks-download", () => {
     db.close();
   });
 
+  test("openSession throw does not kill the download loop", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const block = makeVariantBlock(0);
+    const internalHex = internalHashHex(block);
+    db.matchedBlocks.insert({ height: 0, blockHashInternalHex: internalHex });
+    seedPeer(db, "1.1.1.1");
+    seedPeer(db, "2.2.2.2");
+
+    const logs: string[] = [];
+    const mod = createBlocksDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        openSession: async (host, port, opts) => {
+          if (host === "1.1.1.1") throw new Error("connect exploded");
+          return makeOpenSession(new Map([[internalHex, block]]))!(
+            host,
+            port,
+            opts,
+          );
+        },
+        concurrency: 1,
+        log: (message) => logs.push(message),
+      },
+    );
+    await mod.start();
+    await waitFor(() => db.blocks.count() === 1);
+    expect(
+      logs.some((line) =>
+        /^block failure attempt=\d+ peer=1\.1\.1\.1:8333 phase=session elapsedMs=\d+ cooldownMs=3000 error=connect exploded$/.test(
+          line,
+        ),
+      ),
+    ).toBe(true);
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("honors idleDelayMs when a match appears without a kick", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const block = makeVariantBlock(0);
+    const internalHex = internalHashHex(block);
+    seedPeer(db, "1.1.1.1");
+
+    const mod = createBlocksDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        openSession: makeOpenSession(new Map([[internalHex, block]])),
+        concurrency: 1,
+        idleDelayMs: 40,
+      },
+    );
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(db.blocks.count()).toBe(0);
+
+    db.matchedBlocks.insert({
+      height: 0,
+      blockHashInternalHex: internalHex,
+    });
+    // Poll is idleDelayMs (40), not PEER_WAIT_MS (1000). No bus kick.
+    await waitFor(() => db.blocks.count() === 1, 800);
+
+    await mod.stop();
+    db.close();
+  });
+
   test("while sync:idle, peers:updated does not open sessions", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
