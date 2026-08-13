@@ -26,13 +26,6 @@ export type PeersDiscoveryOptions = {
   reseedIntervalMs?: number;
 };
 
-function pickNext(
-  peers: { host: string; port: number; lastProbedAt: number | null }[],
-  inflight: Set<string>,
-) {
-  return peers.find((p) => !inflight.has(`${p.host}:${p.port}`));
-}
-
 export function createPeersDiscoveryModule(
   ctx: ModuleContext,
   options: PeersDiscoveryOptions,
@@ -65,6 +58,7 @@ export function createPeersDiscoveryModule(
   let unsubCatchup: (() => void) | undefined;
   let wake: (() => void) | undefined;
   let lastReseedAt = 0;
+  let dnsInFlight = false;
   const inflight = new Set<string>();
 
   function kick() {
@@ -114,12 +108,28 @@ export function createPeersDiscoveryModule(
     });
   }
 
+  async function pullSeeds(): Promise<void> {
+    if (dnsInFlight) return;
+    dnsInFlight = true;
+    try {
+      const seeds = await resolveSeeds();
+      if (stopped || paused) return;
+      for (const candidate of seeds) upsertCandidate(candidate);
+      if (seeds.length > 0) {
+        emitUpdated();
+        kick();
+      }
+    } catch {
+      // ignore DNS failures; probe loop continues
+    } finally {
+      lastReseedAt = now();
+      dnsInFlight = false;
+    }
+  }
+
   async function bootstrap(): Promise<void> {
     if (ctx.db.peers.listAlive().length > 0) return;
-    const seeds = await resolveSeeds();
-    if (stopped) return;
-    for (const candidate of seeds) upsertCandidate(candidate);
-    if (seeds.length > 0) emitUpdated();
+    await pullSeeds();
   }
 
   function aliveCompactFilterCount(): number {
@@ -132,18 +142,53 @@ export function createPeersDiscoveryModule(
 
   /** When the alive CF pool is thin, pull fresh DNS seed candidates. */
   async function maybeReseed(): Promise<void> {
-    const t = now();
-    if (t - lastReseedAt < reseedIntervalMs) return;
+    if (dnsInFlight) return;
+    if (now() - lastReseedAt < reseedIntervalMs) return;
     if (aliveCompactFilterCount() >= minAliveCompactFilters) return;
-    lastReseedAt = t;
-    try {
-      const seeds = await resolveSeeds();
-      if (stopped) return;
-      for (const candidate of seeds) upsertCandidate(candidate);
-      if (seeds.length > 0) emitUpdated();
-    } catch {
-      // ignore DNS failures; probe loop continues
+    await pullSeeds();
+  }
+
+  function takeProbeBatch(limit: number): { host: string; port: number }[] {
+    if (limit <= 0) return [];
+    const picked: { host: string; port: number }[] = [];
+    const seen = new Set(inflight);
+    const t = now();
+    const due = (lastProbedAt: number | null) =>
+      lastProbedAt === null || t - lastProbedAt >= probeTimeoutMs;
+    const take = (
+      peers: { host: string; port: number }[],
+      max = limit,
+    ) => {
+      for (const peer of peers) {
+        if (picked.length >= max) return;
+        const key = `${peer.host}:${peer.port}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        picked.push(peer);
+      }
+    };
+    if (aliveCompactFilterCount() < minAliveCompactFilters) {
+      // Prefer known CF peers, but never the whole batch — new DNS seeds
+      // have services=0 and would otherwise wait behind dead CF rows.
+      const cfMax = limit < 2 ? limit : Math.ceil(limit / 2);
+      take(
+        ctx.db.peers
+          .listWithServices(
+            BigInt(NODE_COMPACT_FILTERS),
+            minAliveCompactFilters + concurrency + 32,
+          )
+          .filter((p) => !p.alive && due(p.lastProbedAt)),
+        cfMax,
+      );
     }
+    if (picked.length < limit) {
+      take(
+        ctx.db.peers
+          .listProbeQueue(concurrency + inflight.size + 16)
+          .filter((p) => due(p.lastProbedAt)),
+      );
+    }
+    return picked;
   }
 
   async function runLoop(): Promise<void> {
@@ -152,34 +197,18 @@ export function createPeersDiscoveryModule(
         await waitForKick(60_000);
         continue;
       }
-      await maybeReseed();
+      void maybeReseed().catch(() => {});
+      const batch = takeProbeBatch(concurrency - inflight.size);
       let spawned = 0;
-      while (!stopped && !paused && inflight.size < concurrency) {
-        // Prefer known compact-filter peers when that pool is empty — otherwise
-        // the generic queue burns slots on peers that can't serve filters/blocks.
-        const needCf = aliveCompactFilterCount() < minAliveCompactFilters;
-        const cfCandidates = needCf
-          ? ctx.db.peers
-              .listWithServices(
-                BigInt(NODE_COMPACT_FILTERS),
-                concurrency + inflight.size + 32,
-              )
-              .filter((p) => !p.alive)
-          : [];
-        const next =
-          pickNext(cfCandidates, inflight) ??
-          pickNext(
-            ctx.db.peers.listProbeQueue(concurrency + inflight.size + 16),
-            inflight,
-          );
-        if (!next) break;
+      for (const next of batch) {
+        if (stopped || paused) break;
         const key = `${next.host}:${next.port}`;
         inflight.add(key);
-        emitSockets();
         spawned++;
         void (async () => {
           try {
             const result = await probe(next.host, next.port);
+            if (stopped) return;
             // markProbed / markAlive / new upserts all mutate peer rows.
             ctx.db.peers.markProbed(next.host, next.port, now());
             if (result.ok) {
@@ -199,16 +228,19 @@ export function createPeersDiscoveryModule(
             }
             emitUpdated();
           } catch {
+            if (stopped) return;
             ctx.db.peers.markProbed(next.host, next.port, now());
             ctx.db.peers.markAlive(next.host, next.port, false);
             emitUpdated();
           } finally {
+            if (stopped) return;
             inflight.delete(key);
             emitSockets();
             kick(); // refill a slot immediately
           }
         })();
       }
+      if (spawned > 0) emitSockets();
 
       if (stopped) break;
 
@@ -245,17 +277,10 @@ export function createPeersDiscoveryModule(
         paused = false;
         kick();
       });
-      // Grace period so startup doesn't DNS-reseed on top of bootstrap.
-      lastReseedAt = now();
       // Don't await DNS bootstrap — it blocks the whole module start chain
       // (and filters-matching) when the peer table is empty.
-      void bootstrap()
-        .then(() => {
-          if (!stopped) void detachLoop(ctx, "peers-discovery", runLoop());
-        })
-        .catch(() => {
-          if (!stopped) void detachLoop(ctx, "peers-discovery", runLoop());
-        });
+      void bootstrap().catch(() => {});
+      void detachLoop(ctx, "peers-discovery", runLoop());
       ctx.bus.emit("module:status", {
         module: "peers-discovery",
         status: "running",
