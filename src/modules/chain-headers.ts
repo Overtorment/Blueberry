@@ -41,7 +41,7 @@ export type ChainHeadersOptions = {
   connectTimeoutMs?: number;
   /** getheaders download after handshake. */
   headersTimeoutMs?: number;
-  /** How many peers to ask in parallel for the same locator (first ok wins). */
+  /** How many peers to ask in parallel for the same locator (first non-empty wins). */
   racePeers?: number;
   pollIntervalMs?: number;
   consensus?: HeaderConsensusParams;
@@ -68,18 +68,6 @@ function peerKey(host: string, port: number): string {
   return `${host}:${port}`;
 }
 
-function buildLocator(hashesNewestFirst: Uint8Array[]): Uint8Array[] {
-  const out: Uint8Array[] = [];
-  let step = 1;
-  let i = 0;
-  while (i < hashesNewestFirst.length && out.length < 32) {
-    out.push(hashesNewestFirst[i]!);
-    i += step;
-    if (out.length > 10) step *= 2;
-  }
-  return out;
-}
-
 function buildLocatorHashes(
   ctx: ModuleContext,
   tipHeight: number,
@@ -97,7 +85,16 @@ function buildLocatorHashes(
     height -= step;
     if (hashesNewestFirst.length > 10) step *= 2;
   }
-  return buildLocator(hashesNewestFirst);
+  const checkpoint = ctx.db.headers.get(checkpointHeight);
+  if (checkpoint && checkpointHeight < tipHeight) {
+    const hex = checkpoint.hashInternalHex;
+    const hasCheckpoint = hashesNewestFirst.some((h) => bytesToHex(h) === hex);
+    if (!hasCheckpoint) {
+      if (hashesNewestFirst.length >= 32) hashesNewestFirst.pop();
+      hashesNewestFirst.push(hexToBytes(hex));
+    }
+  }
+  return hashesNewestFirst;
 }
 
 function persistBranch(
@@ -190,6 +187,8 @@ function applyHeaderBatch(
   nowSeconds: () => number,
   loadChainThrough: (ancestorHeight: number) => ValidatedHeaderChain,
 ): ApplyResult {
+  if (headers.length === 0) return { status: "nothing_new" };
+
   const prevHex = bytesToHex(headers[0]!.previousBlockHash);
   let ancestorHeight = base.heightByHashInternal.get(prevHex);
   if (ancestorHeight === undefined) {
@@ -203,12 +202,15 @@ function applyHeaderBatch(
     ancestorHeight = fromDb;
   }
 
-  // Ensure in-memory window covers ancestor lookback for retarget/MTP.
+  // Retarget/MTP lookback around the ancestor — not the whole chain to tip.
+  const needFrom = Math.max(
+    consensus.checkpoint.height,
+    ancestorHeight -
+      Math.max(consensus.retargetInterval, consensus.medianTimeSpan),
+  );
   const chain =
     base.entriesByHeight.has(ancestorHeight) &&
-    base.entriesByHeight.has(
-      Math.max(consensus.checkpoint.height, ancestorHeight - 11),
-    )
+    base.entriesByHeight.has(needFrom)
       ? base
       : loadChainThrough(ancestorHeight);
 
@@ -223,9 +225,10 @@ function applyHeaderBatch(
   builder.append(records);
   const branch = builder.finish();
   if (branch.headers.length === 0) return { status: "nothing_new" };
-  if (ancestorHeight === chain.tipHeight) {
+  // Compare against the live canonical tip, not a lookback-only slice.
+  if (ancestorHeight === base.tipHeight) {
     persistBranch(ctx, branch, "append", ancestorHeight);
-  } else if (branch.chainWork > chain.chainWork) {
+  } else if (branch.chainWork > base.chainWork) {
     persistBranch(ctx, branch, "replace", ancestorHeight);
   } else {
     return { status: "weaker" };
@@ -272,19 +275,20 @@ export function createChainHeadersModule(
   let unsubCatchup: (() => void) | undefined;
   let wake: (() => void) | undefined;
   let unsubPeers: (() => void) | undefined;
+  let loopPromise: Promise<void> | undefined;
   let maxPeerStartHeight = 0;
   let peerIndex = 0;
   let sticky: PeerRef | null = null;
   let chain: ValidatedHeaderChain | undefined;
 
-  function pickRacePeers(alive: PeerRef[]): PeerRef[] {
+  function pickRacePeers(alive: PeerRef[], ignore: Set<string>): PeerRef[] {
     const n = Math.min(racePeers, alive.length);
     const picked: PeerRef[] = [];
     const seen = new Set<string>();
 
     const push = (peer: PeerRef) => {
       const key = peerKey(peer.host, peer.port);
-      if (seen.has(key)) return;
+      if (seen.has(key) || ignore.has(key)) return;
       // Never pile onto a mid-download session — that yields instant "session busy"
       // failures and previously busy-looped the sync loop at 100% CPU.
       if (pool?.isBusy(peer.host, peer.port)) return;
@@ -312,10 +316,11 @@ export function createChainHeadersModule(
   }
 
   /**
-   * Ask several peers for the same locator; first ok response wins.
-   * Peers that fail before the winner are returned in `failed` (session-dead).
-   * "session busy" is soft — not a peer death. Late responses after a winner
-   * are ignored (not marked dead).
+   * Ask several peers for the same locator; first non-empty ok response wins.
+   * Empty batches wait for in-flight peers so a lagging peer cannot hide a
+   * real batch. Peers that fail before the winner are returned in `failed`
+   * (session-dead). "session busy" is soft — not a peer death. Late responses
+   * after a winner are ignored (not marked dead). Fetch rejections are hard fails.
    */
   function raceHeaderFetch(
     peers: PeerRef[],
@@ -336,39 +341,75 @@ export function createChainHeadersModule(
       let settled = false;
       let hardFails = 0;
       const failed: PeerRef[] = [];
+      let emptyWinner: {
+        peer: PeerRef;
+        result: Extract<HeaderBatchResult, { ok: true }>;
+      } | null = null;
+
+      const finish = (value: {
+        winner:
+          | { peer: PeerRef; result: Extract<HeaderBatchResult, { ok: true }> }
+          | null;
+        failed: PeerRef[];
+        busyOnly: boolean;
+      }) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+
+      const onSettledPeer = () => {
+        pending--;
+        if (pending !== 0) return;
+        if (emptyWinner) {
+          finish({ winner: emptyWinner, failed, busyOnly: false });
+          return;
+        }
+        finish({
+          winner: null,
+          failed,
+          busyOnly: hardFails === 0,
+        });
+      };
 
       for (const peer of peers) {
-        void fetchBatch(peer.host, peer.port, {
-          connectTimeoutMs,
-          headersTimeoutMs,
-          locatorHashes,
-        }).then((result) => {
-          if (settled) return;
-          if (result.ok) {
-            settled = true;
-            resolve({ winner: { peer, result }, failed, busyOnly: false });
-            return;
-          }
-          if (result.error === SESSION_BUSY_ERROR) {
-            pending--;
-            if (pending === 0) {
-              settled = true;
-              resolve({
-                winner: null,
-                failed,
-                busyOnly: hardFails === 0,
-              });
+        void Promise.resolve(
+          fetchBatch(peer.host, peer.port, {
+            connectTimeoutMs,
+            headersTimeoutMs,
+            locatorHashes,
+          }),
+        ).then(
+          (result) => {
+            if (settled) return;
+            if (result.ok) {
+              if (result.headers.length > 0) {
+                finish({
+                  winner: { peer, result },
+                  failed,
+                  busyOnly: false,
+                });
+                return;
+              }
+              emptyWinner ??= { peer, result };
+              onSettledPeer();
+              return;
             }
-            return;
-          }
-          hardFails++;
-          failed.push(peer);
-          pending--;
-          if (pending === 0) {
-            settled = true;
-            resolve({ winner: null, failed, busyOnly: false });
-          }
-        });
+            if (result.error === SESSION_BUSY_ERROR) {
+              onSettledPeer();
+              return;
+            }
+            hardFails++;
+            failed.push(peer);
+            onSettledPeer();
+          },
+          () => {
+            if (settled) return;
+            hardFails++;
+            failed.push(peer);
+            onSettledPeer();
+          },
+        );
       }
     });
   }
@@ -397,20 +438,18 @@ export function createChainHeadersModule(
     });
   }
 
-  /** Load a tip window of already-validated headers — never re-run consensus. */
-  function loadTrustedWindow(ancestorHeight?: number): ValidatedHeaderChain {
+  /** Load already-validated headers — never re-run consensus. */
+  function loadTrustedWindow(throughHeight?: number): ValidatedHeaderChain {
     const tip = ctx.db.headers.tip();
     if (!tip) {
       throw new Error("headers DB has no tip");
     }
-    let from = Math.max(checkpointHeight, tip.height - TRUSTED_CHAIN_WINDOW);
-    if (ancestorHeight !== undefined) {
-      from = Math.min(
-        from,
-        Math.max(checkpointHeight, ancestorHeight - TRUSTED_CHAIN_WINDOW),
-      );
-    }
-    const rows = ctx.db.headers.loadRange(from, tip.height);
+    const to =
+      throughHeight === undefined
+        ? tip.height
+        : Math.min(tip.height, Math.max(checkpointHeight, throughHeight));
+    const from = Math.max(checkpointHeight, to - TRUSTED_CHAIN_WINDOW);
+    const rows = ctx.db.headers.loadRange(from, to);
     if (rows.length === 0) {
       throw new Error("trusted header window is empty");
     }
@@ -424,7 +463,7 @@ export function createChainHeadersModule(
 
   function trimChainMemory(next: ValidatedHeaderChain): ValidatedHeaderChain {
     if (next.headers.length <= TRUSTED_CHAIN_WINDOW * 2) return next;
-    return loadTrustedWindow(next.tipHeight);
+    return loadTrustedWindow();
   }
 
   function emitProgress(): void {
@@ -451,6 +490,7 @@ export function createChainHeadersModule(
 
   async function runLoop(): Promise<void> {
     const dead = new Set<string>();
+    const skipped = new Set<string>();
 
     function markPeerHardFailed(peer: PeerRef): void {
       dead.add(peerKey(peer.host, peer.port));
@@ -472,14 +512,18 @@ export function createChainHeadersModule(
           continue;
         }
         dead.clear();
+        skipped.clear();
         sticky = null;
         await waitForKick(250);
         continue;
       }
 
-      const raced = pickRacePeers(alive);
+      const raced = pickRacePeers(alive, skipped);
       if (raced.length === 0) {
-        // Every candidate session is mid-download from a prior race — wait.
+        const hasUnskipped = alive.some(
+          (p) => !skipped.has(peerKey(p.host, p.port)),
+        );
+        if (!hasUnskipped) skipped.clear();
         await waitForKick(100);
         continue;
       }
@@ -495,6 +539,7 @@ export function createChainHeadersModule(
         raced,
         locatorHashes,
       );
+      if (stopped) break;
 
       for (const peer of failed) {
         markPeerHardFailed(peer);
@@ -513,8 +558,9 @@ export function createChainHeadersModule(
       peerIndex += Math.max(1, raced.length);
 
       if (result.headers.length === 0) {
-        // Empty ⇒ peer has nothing beyond our locator. Drop inflated handshake
-        // startHeight so progress is not stuck below 100%.
+        // Empty ⇒ raced peers have nothing beyond our locator. Drop inflated
+        // handshake startHeight so progress is not stuck below 100%.
+        skipped.clear();
         maxPeerStartHeight = ensureChain().tipHeight;
         emitProgress();
         tryFreezeBirthday();
@@ -538,13 +584,15 @@ export function createChainHeadersModule(
           loadTrustedWindow,
         );
         if (applied.status === "applied") {
+          skipped.clear();
           chain = trimChainMemory(applied.chain);
           emitProgress();
           tryFreezeBirthday();
           // Keep winner session open in the pool for the next batch.
           continue;
         }
-        await waitForKick(100);
+        skipped.add(peerKey(peer.host, peer.port));
+        sticky = null;
       } catch (err) {
         if (!(err instanceof HeaderConsensusError)) throw err;
         markPeerHardFailed(peer);
@@ -577,7 +625,7 @@ export function createChainHeadersModule(
         if (quiet) return;
         kick();
       });
-      void detachLoop(ctx, "chain-headers", runLoop());
+      loopPromise = detachLoop(ctx, "chain-headers", runLoop());
       ctx.bus.emit("module:status", {
         module: "chain-headers",
         status: "running",
@@ -594,6 +642,9 @@ export function createChainHeadersModule(
       unsubPeers = undefined;
       kick();
       await pool?.closeAll();
+      await loopPromise;
+      await pool?.closeAll();
+      loopPromise = undefined;
       sticky = null;
       ctx.bus.emit("module:status", {
         module: "chain-headers",

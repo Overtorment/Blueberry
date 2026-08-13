@@ -70,19 +70,8 @@ function record(height: number, header: BlockHeader): HeaderRecord {
   return storedHeaderFromBlockHeader(height, header);
 }
 
-/** Easy-difficulty chain long enough to reorg from height 1 with a heavier fork. */
-function buildReorgFixture(): {
-  params: HeaderConsensusParams;
-  canonical: HeaderRecord[];
-  heavierFork: BlockHeader[];
-} {
-  const checkpoint = mineHeader({
-    bits: EASY_BITS,
-    timestamp: 1_000,
-    marker: 1,
-    powLimit: EASY_LIMIT,
-  });
-  const params: HeaderConsensusParams = {
+function easyConsensus(checkpoint: BlockHeader): HeaderConsensusParams {
+  return {
     powLimit: EASY_LIMIT,
     targetSpacingSeconds: 10,
     targetTimespanSeconds: 40,
@@ -96,6 +85,50 @@ function buildReorgFixture(): {
       previousTimestamps: [],
     },
   };
+}
+
+function persistRecords(
+  db: ReturnType<typeof createSqliteDatabase>,
+  records: HeaderRecord[],
+): void {
+  db.headers.append(
+    records.map((r) => ({
+      height: r.height,
+      hashInternalHex: r.hashInternalHex,
+      header: hexToBytes(r.headerHex),
+    })),
+  );
+}
+
+function upsertPeer(
+  db: ReturnType<typeof createSqliteDatabase>,
+  host: string,
+): void {
+  db.peers.upsert({
+    host,
+    port: 8333,
+    services: 0n,
+    alive: true,
+    usedForBlocks: false,
+    lastProbedAt: null,
+  });
+}
+
+/** Easy-difficulty chain long enough to reorg from height 1 with a heavier fork. */
+function buildReorgFixture(): {
+  params: HeaderConsensusParams;
+  canonical: HeaderRecord[];
+  heavierFork: BlockHeader[];
+  weakerFork: BlockHeader[];
+  nextCanonical: BlockHeader;
+} {
+  const checkpoint = mineHeader({
+    bits: EASY_BITS,
+    timestamp: 1_000,
+    marker: 1,
+    powLimit: EASY_LIMIT,
+  });
+  const params = easyConsensus(checkpoint);
 
   let tip = checkpoint;
   const canonical: HeaderRecord[] = [record(0, checkpoint)];
@@ -134,7 +167,47 @@ function buildReorgFixture(): {
     powLimit: EASY_LIMIT,
   });
 
-  return { params, canonical, heavierFork: [forkA, forkB, forkC] };
+  const nextCanonical = mineHeader({
+    previousHash: hexToBytes(canonical[canonical.length - 1]!.hashInternalHex),
+    bits: EASY_BITS,
+    timestamp: 1_060,
+    marker: 5,
+    powLimit: EASY_LIMIT,
+  });
+
+  return {
+    params,
+    canonical,
+    heavierFork: [forkA, forkB, forkC],
+    weakerFork: [forkA],
+    nextCanonical,
+  };
+}
+
+function mineEasyChain(count: number): {
+  params: HeaderConsensusParams;
+  records: HeaderRecord[];
+} {
+  const checkpoint = mineHeader({
+    bits: EASY_BITS,
+    timestamp: 1_000,
+    marker: 1,
+    powLimit: EASY_LIMIT,
+  });
+  const params = easyConsensus(checkpoint);
+  let tip = checkpoint;
+  const records: HeaderRecord[] = [record(0, checkpoint)];
+  for (let i = 1; i < count; i++) {
+    tip = mineHeader({
+      previousHash: headerHashInternal(tip),
+      bits: EASY_BITS,
+      timestamp: 1_000 + i * 10,
+      marker: i + 1,
+      powLimit: EASY_LIMIT,
+    });
+    records.push(record(i, tip));
+  }
+  return { params, records };
 }
 
 describe("chain-headers", () => {
@@ -663,6 +736,226 @@ describe("chain-headers", () => {
       status: "ok",
       height: CHECKPOINT_HEIGHT + 1,
     });
+    await mod.stop();
+    db.close();
+  });
+
+  test("empty headers do not win a race against an in-flight non-empty batch", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    upsertPeer(db, "empty.peer");
+    upsertPeer(db, "slow.peer");
+
+    const nextHeader = decodeBlockHeader(
+      hexToBytes(
+        "000000208fdfeffd2c3a3a235a847805dbd1dc5adb9cd48519532a000000000000000000105b6f8cba2f1258ea4c1e41f72e843c770c3acfede6f02df3108c6fba7b88bfca4f2a5ca5183217d6a930c9",
+      ),
+    );
+
+    const mod = createChainHeadersModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        racePeers: 2,
+        connectTimeoutMs: 200,
+        headersTimeoutMs: 200,
+        pollIntervalMs: 10_000,
+        fetchBatch: async (host) => {
+          if (host === "empty.peer") {
+            return {
+              ok: true as const,
+              startHeight: CHECKPOINT_HEIGHT + 100,
+              headers: [],
+            };
+          }
+          await new Promise((r) => setTimeout(r, 40));
+          return {
+            ok: true as const,
+            startHeight: CHECKPOINT_HEIGHT + 100,
+            headers: [nextHeader],
+          };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.headers.tip()?.height === CHECKPOINT_HEIGHT + 1);
+    await mod.stop();
+    db.close();
+  });
+
+  test("locator is sampled once and ends at the checkpoint", async () => {
+    const { params, records } = mineEasyChain(25);
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    persistRecords(db, records);
+    upsertPeer(db, "1.1.1.1");
+
+    let locator: Uint8Array[] | undefined;
+    const mod = createChainHeadersModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        consensus: params,
+        connectTimeoutMs: 200,
+        headersTimeoutMs: 200,
+        pollIntervalMs: 10_000,
+        nowSeconds: () => 10_000,
+        fetchBatch: async (_host, _port, opts) => {
+          locator ??= opts.locatorHashes;
+          return { ok: true as const, startHeight: 24, headers: [] };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => locator !== undefined);
+    await mod.stop();
+
+    const heights = locator!.map(
+      (hash) => db.headers.heightForHashInternal(bytesToHex(hash)),
+    );
+    expect(heights.slice(0, 11)).toEqual([
+      24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14,
+    ]);
+    expect(heights).toContain(11);
+    expect(heights.at(-1)).toBe(0);
+    db.close();
+  });
+
+  test("fetchBatch rejection does not hang the sync loop", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    upsertPeer(db, "1.1.1.1");
+
+    const mod = createChainHeadersModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        racePeers: 1,
+        connectTimeoutMs: 100,
+        headersTimeoutMs: 100,
+        pollIntervalMs: 10_000,
+        fetchBatch: async () => {
+          throw new Error("boom");
+        },
+      },
+    );
+    await mod.start();
+    await waitFor(() => db.peers.listAlive().length === 0);
+    await mod.stop();
+    db.close();
+  });
+
+  test("stop waits for the in-flight loop before returning", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    upsertPeer(db, "1.1.1.1");
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let fetches = 0;
+    const mod = createChainHeadersModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        pollIntervalMs: 10_000,
+        fetchBatch: async () => {
+          fetches++;
+          await gate;
+          return {
+            ok: true as const,
+            startHeight: CHECKPOINT_HEIGHT + 1,
+            headers: [],
+          };
+        },
+      },
+    );
+    await mod.start();
+    await waitFor(() => fetches === 1);
+    let stopFinished = false;
+    const stopP = Promise.resolve(mod.stop()).then(() => {
+      stopFinished = true;
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(stopFinished).toBe(false);
+    expect(fetches).toBe(1);
+    release();
+    await stopP;
+    expect(stopFinished).toBe(true);
+    db.close();
+  });
+
+  test("does not replace the canonical chain with a weaker fork", async () => {
+    const { params, canonical, weakerFork } = buildReorgFixture();
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    persistRecords(db, canonical);
+    upsertPeer(db, "1.1.1.1");
+    const oldTip = canonical[canonical.length - 1]!;
+
+    const mod = createChainHeadersModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        consensus: params,
+        connectTimeoutMs: 200,
+        headersTimeoutMs: 200,
+        pollIntervalMs: 50,
+        nowSeconds: () => 10_000,
+        fetchBatch: async () => ({
+          ok: true as const,
+          startHeight: 10,
+          headers: weakerFork,
+        }),
+      },
+    );
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(db.headers.tip()?.height).toBe(oldTip.height);
+    expect(db.headers.tip()?.hashInternalHex).toBe(oldTip.hashInternalHex);
+    await mod.stop();
+    db.close();
+  });
+
+  test("skips a weaker-fork peer and applies an extension from another peer", async () => {
+    const { params, canonical, weakerFork, nextCanonical } = buildReorgFixture();
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    persistRecords(db, canonical);
+    upsertPeer(db, "weak.peer");
+    upsertPeer(db, "good.peer");
+
+    const mod = createChainHeadersModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        consensus: params,
+        racePeers: 2,
+        connectTimeoutMs: 200,
+        headersTimeoutMs: 200,
+        pollIntervalMs: 10_000,
+        nowSeconds: () => 10_000,
+        fetchBatch: async (host) => {
+          if (host === "weak.peer") {
+            return { ok: true as const, startHeight: 10, headers: weakerFork };
+          }
+          await new Promise((r) => setTimeout(r, 30));
+          return {
+            ok: true as const,
+            startHeight: 10,
+            headers: [nextCanonical],
+          };
+        },
+      },
+    );
+    await mod.start();
+    await waitFor(() => db.headers.tip()?.height === 4);
+    expect(db.headers.tip()?.hashInternalHex).toBe(
+      bytesToHex(headerHashInternal(nextCanonical)),
+    );
     await mod.stop();
     db.close();
   });
