@@ -77,6 +77,7 @@ export function trustedChainFromStored(
     tipHashInternal: hexToBytes(tip.hashInternalHex),
     tipHashDisplay: tipRecord.hashDisplay,
     chainWork: tip.cumulativeWork,
+    params,
     byHeight,
     heightByHashInternal,
     entriesByHeight,

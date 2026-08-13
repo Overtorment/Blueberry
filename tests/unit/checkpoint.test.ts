@@ -34,7 +34,9 @@ describe("year checkpoints", () => {
       const entry = checkpointForYear(year);
       expect(entry.name).toBe(String(year));
       expect(entry.height % 2016).toBe(0);
-      expect(entry.previousTimestamps).toHaveLength(10);
+      expect(entry.previousTimestamps).toHaveLength(
+        Math.min(10, entry.height),
+      );
 
       const header = decodeBlockHeader(hexToBytes(entry.headerHex));
       expect(meetsTarget(headerHashInternal(header), header.bits)).toBe(true);
@@ -42,7 +44,7 @@ describe("year checkpoints", () => {
       if (year === 2009) {
         expect(entry.height).toBe(0);
         expect(headerHashDisplay(header)).toBe(GENESIS_DISPLAY_HASH);
-        expect(entry.previousTimestamps.every((t) => t === 0)).toBe(true);
+        expect(entry.previousTimestamps).toEqual([]);
       } else {
         expect(header.timestamp).toBeLessThanOrEqual(Date.UTC(year, 0, 1) / 1000);
       }
@@ -65,13 +67,14 @@ describe("year checkpoints", () => {
   });
 
   test("non-default year builds a valid one-header chain", () => {
-    const year = 2015;
-    const seed = checkpointSeedRecord(year);
-    const chain = validateHeaderChain(
-      [seed],
-      consensusForYear(year),
-      seed.header.timestamp + 60,
-    );
-    expect(chain.tipHeight).toBe(checkpointForYear(year).height);
+    for (const year of [2009, 2015]) {
+      const seed = checkpointSeedRecord(year);
+      const chain = validateHeaderChain(
+        [seed],
+        consensusForYear(year),
+        seed.header.timestamp + 60,
+      );
+      expect(chain.tipHeight).toBe(checkpointForYear(year).height);
+    }
   });
 });

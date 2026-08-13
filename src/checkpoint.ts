@@ -25,7 +25,7 @@ export const CHECKPOINTS: Readonly<Record<number, YearCheckpoint>> = {
     name: "2009",
     height: 0,
     headerHex: "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c",
-    previousTimestamps: [0,0,0,0,0,0,0,0,0,0],
+    previousTimestamps: [],
   },
   2010: {
     name: "2010",

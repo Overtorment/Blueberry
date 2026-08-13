@@ -13,10 +13,10 @@
         "@scure/bip32": "^1.7.0",
         "@scure/bip39": "^1.6.0",
         "@scure/btc-signer": "^1.8.1",
-        "bip157": "github:Overtorment/bip157#c5371f8",
-        "bip158": "github:Overtorment/bip158#bbc1b3f",
-        "bip324": "github:Overtorment/bip324#8abbc6d",
-        "bitcoin-headers": "github:Overtorment/bitcoin-headers#538946d",
+        "bip157": "github:Overtorment/bip157#e0ac15b",
+        "bip158": "github:Overtorment/bip158#1a38dec",
+        "bip324": "github:Overtorment/bip324#948702c",
+        "bitcoin-headers": "github:Overtorment/bitcoin-headers#c08d90e",
         "bitcoinjs-lib": "7.0.1",
         "qr": "^0.6.0",
         "react": "^19.2.0",
@@ -139,15 +139,15 @@
 
     "bignumber.js": ["bignumber.js@9.3.1", "", {}, "sha512-Ko0uX15oIUS7wJ3Rb30Fs6SkVbLmPBAKdlm7q9+ak9bbIeFf0MwuBsQV6z7+X768/cHsfg+WlysDWJcmthjsjQ=="],
 
-    "bip157": ["bip157@github:Overtorment/bip157#c5371f8", { "dependencies": { "@noble/hashes": "^2.2.0" } }, "Overtorment-bip157-c5371f8", "sha512-H+PDgMQSfto0G/sxp+wDpe8LH0f36fMv0o9qdGFXHUXpT2Jhj7xR54rnbNN+gV9ikHB5JoY8D4Ktlye+DEhfaA=="],
+    "bip157": ["bip157@github:Overtorment/bip157#e0ac15b", { "dependencies": { "@noble/hashes": "^2.2.0" } }, "Overtorment-bip157-e0ac15b", "sha512-vMEHjyPvi+fZPJB7mlEJABhutEO+pBZ7czDU8WTXMX5isVODCM117eYPObnMfpeEtfAO20bNwiOX8GTKRP7cQw=="],
 
-    "bip158": ["bip158@github:Overtorment/bip158#bbc1b3f", { "dependencies": { "@noble/hashes": "^2.2.0" } }, "Overtorment-bip158-bbc1b3f", "sha512-mK8/2wEOwj1+WlfdGDU7b6RRiqF0EzFx2W4gR+VksRUqj9QyhxmRD32WUtOY+sOy9dV9rvnEwnc++NNZcgLpgQ=="],
+    "bip158": ["bip158@github:Overtorment/bip158#1a38dec", { "dependencies": { "@noble/hashes": "^2.2.0" } }, "Overtorment-bip158-1a38dec", "sha512-7piXCTEiJfV9v+vaD1HxT3/Rnwo2Li/MtCFmo4VXGAjgFY4taz/mZ33V1SPuXKJShxJZZ/gPK5h1baOBZId36A=="],
 
     "bip174": ["bip174@3.0.0", "", { "dependencies": { "uint8array-tools": "^0.0.9", "varuint-bitcoin": "^2.0.0" } }, "sha512-N3vz3rqikLEu0d6yQL8GTrSkpYb35NQKWMR7Hlza0lOj6ZOlvQ3Xr7N9Y+JPebaCVoEUHdBeBSuLxcHr71r+Lw=="],
 
-    "bip324": ["bip324@github:Overtorment/bip324#8abbc6d", { "dependencies": { "@noble/ciphers": "^2.2.0", "@noble/hashes": "^2.2.0", "@scure/btc-signer": "^2.2.0" } }, "Overtorment-bip324-8abbc6d", "sha512-LwoZm5lNw595UoCfo4nyidLA3yZNwHlXSQhQNgdMz76sUqy+F/KEzWdlowhuuEFZ+UvkcQmJm4RCNDUDKmLEOQ=="],
+    "bip324": ["bip324@github:Overtorment/bip324#948702c", { "dependencies": { "@noble/ciphers": "^2.2.0", "@noble/hashes": "^2.2.0", "@scure/btc-signer": "^2.2.0" } }, "Overtorment-bip324-948702c", "sha512-orE/C0MeE6actO5zrDam5bQzaay400nCyx+yF+Idh8MsLrGNOcPVP05bPJeBWhVJ+kEFebDjRDrcXbteuncNfA=="],
 
-    "bitcoin-headers": ["bitcoin-headers@github:Overtorment/bitcoin-headers#538946d", { "dependencies": { "@noble/hashes": "^2.2.0" } }, "Overtorment-bitcoin-headers-538946d", "sha512-QGtzuYXhx/sO7rji//jmFB7E+9jF0amkqiTOxktyCRDblxUUHan9yU/F1qKo9rnyzzuInV/Q7MfNUI+6URQ+WQ=="],
+    "bitcoin-headers": ["bitcoin-headers@github:Overtorment/bitcoin-headers#c08d90e", { "dependencies": { "@noble/hashes": "^2.2.0" } }, "Overtorment-bitcoin-headers-c08d90e", "sha512-QfILfxLpl/p8F+vlMVEHyMnRx+BtAXk7Dc2YbPVCgqUUQFZMJKzxFoaJhxAUkCHsajQO4SAxRZTt0FNP4qZOKg=="],
 
     "bitcoinjs-lib": ["bitcoinjs-lib@7.0.1", "", { "dependencies": { "@noble/hashes": "^1.2.0", "bech32": "^2.0.0", "bip174": "^3.0.0", "bs58check": "^4.0.0", "uint8array-tools": "^0.0.9", "valibot": "^1.2.0", "varuint-bitcoin": "^2.0.0" } }, "sha512-vwEmpL5Tpj0I0RBdNkcDMXePoaYSTeKY6mL6/l5esbnTs+jGdPDuLp4NY1hSh6Zk5wSgePygZ4Wx5JJao30Pww=="],
 

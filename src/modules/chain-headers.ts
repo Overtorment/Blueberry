@@ -169,6 +169,7 @@ function chainAfterBranch(
     tipHashInternal: branch.tipHashInternal.slice(),
     tipHashDisplay: branch.tipHashDisplay,
     chainWork: branch.chainWork,
+    params: base.params,
     byHeight,
     heightByHashInternal,
     entriesByHeight,
@@ -214,7 +215,6 @@ function applyHeaderBatch(
   const builder = new HeaderBranchBuilder(
     chain,
     ancestorHeight,
-    consensus,
     nowSeconds(),
   );
   const records = headers.map((h, i) =>
