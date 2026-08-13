@@ -93,7 +93,7 @@ function buildReorgFixture(): {
       height: 0,
       headerBytes: encodeBlockHeader(checkpoint),
       hashDisplay: headerHashDisplay(checkpoint),
-      previousTimestamps: [890, 900, 910, 920, 930, 940, 950, 960, 970, 980],
+      previousTimestamps: [],
     },
   };
 
