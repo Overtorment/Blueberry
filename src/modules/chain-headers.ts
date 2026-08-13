@@ -120,6 +120,13 @@ function persistBranch(
     ctx.db.rewindAfter(ancestorHeight);
     ctx.db.headers.replaceAfter(ancestorHeight, writes);
   });
+  const at = Date.now();
+  ctx.bus.emit("wallet:txs", { at });
+  ctx.bus.emit("blocks:progress", {
+    at,
+    downloaded: ctx.db.blocks.count(),
+    matched: ctx.db.matchedBlocks.count(),
+  });
 }
 
 /** Extend/replace an in-memory validated chain after a successful branch apply. */

@@ -12,8 +12,6 @@ export type BlocksProgress = {
 export type BlocksMatchedStore = {
   get(): BlocksProgress;
   applyEvent(ev: { at: number; downloaded: number; matched: number }): void;
-  /** Update matched only; keep downloaded / samples. */
-  setMatched(matched: number): void;
   subscribe(listener: () => void): () => void;
 };
 
@@ -84,17 +82,6 @@ export function createBlocksMatchedStore(): BlocksMatchedStore {
         },
       );
       publish(ev.downloaded, ev.matched, ev.at, nextSamples);
-    },
-    setMatched(nextMatched) {
-      const nextSamples =
-        at === null
-          ? samples
-          : nextProgressSamples(
-              samples,
-              { downloaded, total: matched },
-              { at, downloaded, total: nextMatched },
-            );
-      publish(downloaded, nextMatched, at, nextSamples);
     },
     subscribe(listener) {
       listeners.add(listener);

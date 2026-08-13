@@ -29,24 +29,4 @@ describe("blocks matched store", () => {
     expect(store.get().percent).toBe(100);
     expect(store.get().etaMs).toBe(0);
   });
-
-  test("setMatched updates total without adding download samples", () => {
-    const store = createBlocksMatchedStore();
-    store.applyEvent({ at: 1000, downloaded: 100, matched: 500 });
-    store.setMatched(1000);
-    expect(store.get()).toMatchObject({
-      downloaded: 100,
-      matched: 1000,
-      percent: 10,
-      etaMs: null,
-    });
-
-    store.applyEvent({ at: 2000, downloaded: 200, matched: 1000 });
-    expect(store.get().etaMs).toBe(8000);
-
-    store.setMatched(1200);
-    // rate still 100/1000ms; remaining 1000 → 10000ms
-    expect(store.get().etaMs).toBe(10_000);
-    expect(store.get().percent).toBe(16);
-  });
 });

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { hexToBytes } from "bip158";
 import { createMessageBus } from "../../src/bus/message-bus.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 import { createBlocksMatchedStore } from "../../src/tui/blocks-matched-store.ts";
@@ -19,9 +20,16 @@ describe("TUI filters progress wiring", () => {
     expect(store.get()).toBe(snap);
   });
 
-  test("applies filters:progress events to the store", () => {
+  test("hydrates filters from DB; payload total > 0 only; zeros do not clobber", () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
+    db.filters.append([
+      {
+        height: 1,
+        blockHashInternalHex: "11".repeat(32),
+        filter: hexToBytes("aa"),
+      },
+    ]);
     const filtersProgressStore = createFiltersProgressStore();
     const tui = createTuiModule(
       { bus, db },
@@ -34,16 +42,29 @@ describe("TUI filters progress wiring", () => {
       createWalletTxsStore(),
     );
     tui.start();
+    expect(filtersProgressStore.get()).toMatchObject({
+      downloaded: 1,
+      total: 1,
+    });
+    bus.emit("filters:progress", {
+      at: 500,
+      downloaded: 0,
+      total: 0,
+    });
+    expect(filtersProgressStore.get()).toMatchObject({
+      downloaded: 1,
+      total: 1,
+    });
     bus.emit("filters:progress", {
       at: 1000,
       downloaded: 50,
       total: 200,
     });
     expect(filtersProgressStore.get()).toMatchObject({
-      downloaded: 50,
+      downloaded: 1,
       total: 200,
       at: 1000,
-      percent: 25,
+      percent: 0,
     });
     tui.stop();
     db.close();

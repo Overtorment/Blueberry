@@ -84,10 +84,21 @@ describe("TUI matching progress", () => {
       total: 2,
     });
     expect(matchingProgressStore.get()).toMatchObject({
+      scanned: 1,
+      total: 2,
+      percent: 50,
+    });
+    db.filters.markScanned([2]);
+    bus.emit("matching:progress", {
+      at: 3000,
+      scanned: 0,
+      total: 0,
+    });
+    expect(matchingProgressStore.get()).toMatchObject({
       scanned: 2,
       total: 2,
       percent: 100,
-      etaMs: 0,
+      at: 3000,
     });
     tui.stop();
     db.close();

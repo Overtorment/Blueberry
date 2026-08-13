@@ -24,7 +24,7 @@ This revises:
 | Fat snapshots on the bus | No. Do not put tx lists or UI row shapes on events |
 | Persist last peer tip | No. Extra schema. First paint uses local header/filter span as `total` until a live `total > 0` arrives |
 | Lying / zero payloads | Must not overwrite a DB hydrate. `total: 0` and `downloaded: 0` on progress events are ignored for those fields |
-| `blocks:progress` → wallet list | No. Parse backlog and txs refresh only on `wallet:txs` (and at start hydrate) |
+| `blocks:progress` → wallet list | No full snapshot. Refresh parse counts only (`setBlockCounts`). Txs stay on `wallet:txs` |
 | Module start emits for durable data | Optional wakes. Not required for first paint |
 
 ## Architecture
@@ -63,8 +63,8 @@ session event (e.g. peers:sockets, broadcast:*)
 |------------|---------|
 | Peers `known` | `db.peers.count()` |
 | Chain tip `height` | `db.headers.tip().height` |
-| Chain tip `downloaded` | `max(0, tip.height - minHeight + 1)` when both exist |
-| Filters DL `downloaded` | `db.filters.count()` |
+| Chain tip `downloaded` | `max(0, tip.height - minHeight)` when both exist (same span as `chain-headers`) |
+| Filters DL `downloaded` | `db.filters.count()`, clamped to session `total` when `total > 0` |
 | Filters match `scanned` | `db.filters.countScanned()` |
 | Filters match `total` | `db.filters.count()` |
 | Blocks DL `downloaded` | `db.blocks.count()` |
@@ -129,7 +129,7 @@ Boot order in `main.tsx` stays: start tui → mount React → yield → start do
 | `headers:progress` | `hydrateHeaders(db, store, p.total)` |
 | `filters:progress` | `hydrateFilters(db, store, p.total)` |
 | `matching:progress` | `hydrateMatching` (ignore payload counts) |
-| `blocks:progress` | `hydrateBlocks` only (do not call `hydrateWallet`) |
+| `blocks:progress` | `hydrateBlocks` + `hydrateWalletBlockCounts` (counts only, not txs) |
 | `filters:match` | `hydrateBlocks` (remove `setMatched`) |
 | `wallet:txs` | `hydrateWallet` |
 | `sync:idle` | `walletTxsStore.setParsingActive(true)` |
@@ -172,7 +172,7 @@ No schema change. No new bus event names required.
 - `matching:progress` / `blocks:progress` with counts that do not match DB → stores follow DB
 - `headers:progress` with `total > 0` → `total` updates; `height` / `downloaded` still from DB
 - `wallet:txs` still refreshes txs/balance from DB
-- `blocks:progress` updates the Blocks tile from DB and does **not** change `walletTxsStore` tx list / `blocksTotal`
+- `blocks:progress` updates the Blocks tile from DB, updates wallet parse counts, and does **not** replace the tx list
 
 Adapt existing tests that assume payload numbers win (`tui-headers-progress`, `tui-matching-progress`, `tui-blocks-matched`, `tui-wallet-txs` `blocks:progress` → `blocksTotal`).
 

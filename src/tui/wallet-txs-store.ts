@@ -55,6 +55,8 @@ export type WalletTxsSnapshot = {
 export type WalletTxsStore = {
   get(): WalletTxsSnapshot;
   apply(snapshot: WalletTxsSnapshot): void;
+  /** Update parse backlog counts without rebuilding txs / UTXOs. */
+  setBlockCounts(parsed: number, total: number): void;
   setParsingActive(active: boolean): void;
   subscribe(listener: () => void): () => void;
 };
@@ -187,6 +189,38 @@ export function createWalletTxsStore(): WalletTxsStore {
         snapshot = { ...snapshot, etaMs: null };
         notify();
       }
+    },
+    setBlockCounts(parsed, total) {
+      if (
+        snapshot.blocksParsed === parsed &&
+        snapshot.blocksTotal === total
+      ) {
+        return;
+      }
+      const wasDone =
+        snapshot.blocksTotal > 0 &&
+        snapshot.blocksParsed >= snapshot.blocksTotal;
+      const isDone = total > 0 && parsed >= total;
+      if (parsed < snapshot.blocksParsed || (wasDone && !isDone)) {
+        samples = [];
+      }
+      let etaMs = snapshot.etaMs;
+      if (!parsingActive) {
+        etaMs = null;
+      } else if (isDone) {
+        etaMs = 0;
+      } else if (samples.length < 2) {
+        etaMs = null;
+      } else {
+        etaMs = estimateEtaMs(samples, total);
+      }
+      snapshot = {
+        ...snapshot,
+        blocksParsed: parsed,
+        blocksTotal: total,
+        etaMs,
+      };
+      notify();
     },
     apply(next) {
       if (!parsingActive) {

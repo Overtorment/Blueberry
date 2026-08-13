@@ -109,12 +109,19 @@ describe("TUI wallet txs wiring", () => {
     expect(store.get().txs.map((t) => t.height)).toEqual([2, 1]);
     expect(store.get().balanceBtcLabel).toBe("0.00001000 BTC");
 
+    const txsBefore = store.get().txs;
     db.blocks.insert({
       height: 3,
       blockHashInternalHex: "33".repeat(32),
       block: new Uint8Array([0xcc]),
     });
     bus.emit("blocks:progress", { at: 11, downloaded: 3, matched: 3 });
+    expect(store.get().blocksTotal).toBe(3);
+    expect(store.get().blocksParsed).toBe(1);
+    expect(store.get().txs).toBe(txsBefore);
+
+    bus.emit("wallet:txs", { at: 12 });
+    expect(store.get().at).toBe(12);
     expect(store.get().blocksTotal).toBe(3);
     expect(store.get().blocksParsed).toBe(1);
 

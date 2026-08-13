@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { encodeBlockHeader } from "bitcoin-headers";
 import { createMessageBus } from "../../src/bus/message-bus.ts";
 import { checkpointDbRecord, checkpointSeedRecord } from "../../src/checkpoint.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
@@ -14,9 +15,37 @@ import { createWalletTxsStore } from "../../src/tui/wallet-txs-store.ts";
 import { stubPlatformNet } from "./stub-platform-net.ts";
 
 describe("TUI headers progress wiring", () => {
-  test("applies headers:progress events to the store", () => {
+  test("hydrates headers from DB; payload total > 0 only; zeros do not clobber", () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
+    db.headers.append([
+      {
+        height: 10,
+        hashInternalHex: "aa".repeat(32),
+        header: encodeBlockHeader({
+          version: 1,
+          previousBlockHash: new Uint8Array(32),
+          merkleRoot: new Uint8Array(32),
+          timestamp: 1,
+          bits: 0x1d00ffff,
+          nonce: 0,
+        }),
+        cumulativeWork: 10n,
+      },
+      {
+        height: 11,
+        hashInternalHex: "bb".repeat(32),
+        header: encodeBlockHeader({
+          version: 1,
+          previousBlockHash: new Uint8Array(32),
+          merkleRoot: new Uint8Array(32),
+          timestamp: 2,
+          bits: 0x1d00ffff,
+          nonce: 0,
+        }),
+        cumulativeWork: 11n,
+      },
+    ]);
     const headersProgressStore = createHeadersProgressStore();
     const tui = createTuiModule(
       { bus, db },
@@ -29,18 +58,33 @@ describe("TUI headers progress wiring", () => {
       createWalletTxsStore(),
     );
     tui.start();
+    expect(headersProgressStore.get()).toMatchObject({
+      downloaded: 1,
+      total: 1,
+      height: 11,
+    });
     bus.emit("headers:progress", {
       at: 1000,
-      downloaded: 50,
-      total: 200,
-      height: 548_402,
+      downloaded: 0,
+      total: 0,
+      height: 0,
     });
     expect(headersProgressStore.get()).toMatchObject({
-      downloaded: 50,
-      total: 200,
-      height: 548_402,
-      at: 1000,
-      percent: 25,
+      downloaded: 1,
+      total: 1,
+      height: 11,
+    });
+    bus.emit("headers:progress", {
+      at: 2000,
+      downloaded: 999,
+      total: 500,
+      height: 1,
+    });
+    expect(headersProgressStore.get()).toMatchObject({
+      downloaded: 1,
+      total: 500,
+      height: 11,
+      at: 2000,
     });
     tui.stop();
     db.close();
@@ -51,6 +95,22 @@ describe("TUI headers progress wiring", () => {
     const db = createSqliteDatabase(":memory:");
     const seed = checkpointSeedRecord();
     db.headers.ensureCheckpoint(checkpointDbRecord());
+    const base = db.headers.tip()!.cumulativeWork;
+    db.headers.append([
+      {
+        height: seed.height + 1,
+        hashInternalHex: "aa".repeat(32),
+        header: encodeBlockHeader({
+          version: 1,
+          previousBlockHash: new Uint8Array(32),
+          merkleRoot: new Uint8Array(32),
+          timestamp: 1,
+          bits: 0x1d00ffff,
+          nonce: 0,
+        }),
+        cumulativeWork: base + 1n,
+      },
+    ]);
 
     const headersProgressStore = createHeadersProgressStore();
     const tui = createTuiModule(
@@ -65,9 +125,9 @@ describe("TUI headers progress wiring", () => {
     );
     tui.start();
     const seeded = headersProgressStore.get();
-    expect(seeded.downloaded).toBeGreaterThan(0);
-    expect(seeded.total).toBeGreaterThan(0);
-    expect(seeded.height).toBe(seed.height);
+    expect(seeded.height).toBe(seed.height + 1);
+    expect(seeded.downloaded).toBe(1);
+    expect(seeded.total).toBe(1);
 
     const headers = createChainHeadersModule(
       { bus, db },

@@ -4,12 +4,21 @@ import type { BlocksMatchedStore } from "./blocks-matched-store.ts";
 import type { BroadcastStore } from "./broadcast-store.ts";
 import type { FiltersProgressStore } from "./filters-progress-store.ts";
 import type { HeadersProgressStore } from "./headers-progress-store.ts";
+import {
+  hydrateBlocks,
+  hydrateFilters,
+  hydrateFromDb,
+  hydrateHeaders,
+  hydrateMatching,
+  hydratePeers,
+  hydrateWallet,
+  hydrateWalletBlockCounts,
+} from "./hydrate.ts";
 import type { MatchingProgressStore } from "./matching-progress-store.ts";
 import type { PeerSocketsStore } from "./peer-sockets-store.ts";
 import type { ReceiveAddressStore } from "./receive-address-store.ts";
 import type { ModuleStatusStore } from "./status-store.ts";
 import type { WalletTxsStore } from "./wallet-txs-store.ts";
-import { snapshotFromDb } from "./wallet-txs-store.ts";
 
 export function createTuiModule(
   ctx: ModuleContext,
@@ -26,13 +35,6 @@ export function createTuiModule(
 ): Module {
   const unsubs: Array<() => void> = [];
 
-  function refreshWalletUi(at: number): void {
-    walletTxsStore.apply(snapshotFromDb(ctx.db, at, Date.now(), wallet));
-    if (receiveAddressStore && wallet) {
-      receiveAddressStore.refresh(ctx.db, wallet);
-    }
-  }
-
   return {
     name: "tui",
     start() {
@@ -44,39 +46,9 @@ export function createTuiModule(
           });
         }),
       );
-      // Seed progress tiles from DB so the first paint isn't 0/0 while
-      // peers/headers/filters modules are still starting.
-      const filterTotal = ctx.db.filters.count();
-      const headersTip = ctx.db.headers.tip();
-      const headersMin = ctx.db.headers.minHeight();
-      if (headersTip && headersMin !== null) {
-        headersProgressStore.applyEvent({
-          at: Date.now(),
-          downloaded: Math.max(0, headersTip.height - headersMin + 1),
-          total: Math.max(0, headersTip.height - headersMin + 1),
-          height: headersTip.height,
-        });
-      }
-      filtersProgressStore.applyEvent({
-        at: Date.now(),
-        downloaded: filterTotal,
-        total: filterTotal,
-      });
-      matchingProgressStore.applyEvent({
-        at: Date.now(),
-        scanned: ctx.db.filters.countScanned(),
-        total: filterTotal,
-      });
-      blocksMatchedStore.applyEvent({
-        at: Date.now(),
-        downloaded: ctx.db.blocks.count(),
-        matched: ctx.db.matchedBlocks.count(),
-      });
-      refreshWalletUi(Date.now());
-      peerSocketsStore.setKnown(ctx.db.peers.count());
       unsubs.push(
         ctx.bus.on("peers:updated", () => {
-          peerSocketsStore.setKnown(ctx.db.peers.count());
+          hydratePeers(ctx.db, peerSocketsStore);
         }),
       );
       unsubs.push(
@@ -86,37 +58,39 @@ export function createTuiModule(
       );
       unsubs.push(
         ctx.bus.on("headers:progress", (p) => {
-          headersProgressStore.applyEvent(p);
+          hydrateHeaders(ctx.db, headersProgressStore, p.total, p.at);
         }),
       );
       unsubs.push(
         ctx.bus.on("filters:progress", (p) => {
-          filtersProgressStore.applyEvent(p);
+          hydrateFilters(ctx.db, filtersProgressStore, p.total, p.at);
         }),
       );
       unsubs.push(
         ctx.bus.on("matching:progress", (p) => {
-          matchingProgressStore.applyEvent(p);
+          hydrateMatching(ctx.db, matchingProgressStore, p.at);
         }),
       );
       unsubs.push(
         ctx.bus.on("blocks:progress", (p) => {
-          blocksMatchedStore.applyEvent({
-            at: p.at,
-            downloaded: p.downloaded,
-            matched: p.matched,
-          });
-          refreshWalletUi(p.at);
+          hydrateBlocks(ctx.db, blocksMatchedStore, p.at);
+          hydrateWalletBlockCounts(ctx.db, walletTxsStore);
         }),
       );
       unsubs.push(
         ctx.bus.on("filters:match", () => {
-          blocksMatchedStore.setMatched(ctx.db.matchedBlocks.count());
+          hydrateBlocks(ctx.db, blocksMatchedStore);
         }),
       );
       unsubs.push(
         ctx.bus.on("wallet:txs", (p) => {
-          refreshWalletUi(p.at);
+          hydrateWallet(
+            ctx.db,
+            walletTxsStore,
+            receiveAddressStore,
+            wallet,
+            p.at,
+          );
         }),
       );
       unsubs.push(
@@ -141,6 +115,19 @@ export function createTuiModule(
           }),
         );
       }
+      hydrateFromDb(
+        ctx.db,
+        {
+          peerSocketsStore,
+          headersProgressStore,
+          filtersProgressStore,
+          matchingProgressStore,
+          blocksMatchedStore,
+          walletTxsStore,
+          receiveAddressStore,
+        },
+        wallet,
+      );
       ctx.bus.emit("module:status", { module: "tui", status: "starting" });
       ctx.bus.emit("module:status", { module: "tui", status: "running" });
     },
