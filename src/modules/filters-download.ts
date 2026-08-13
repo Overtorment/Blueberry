@@ -49,6 +49,10 @@ function nextCheckpointHeight(from: number): number {
   return Math.ceil((from + 1) / CF_CHECKPT_INTERVAL) * CF_CHECKPT_INTERVAL;
 }
 
+function isBip157CheckpointHeight(height: number): boolean {
+  return height > 0 && height % CF_CHECKPT_INTERVAL === 0;
+}
+
 /** Cap UI bus spam; OpenTUI still needs timer yields from callers to paint. */
 const UI_MIN_MS = 100;
 
@@ -113,6 +117,7 @@ export function createFiltersDownloadModule(
   let unsubPeers: (() => void) | undefined;
   let unsubIdle: (() => void) | undefined;
   let unsubCatchup: (() => void) | undefined;
+  let loopPromise: Promise<void> | undefined;
   let haveCached = 0;
   let lastEmitAt = 0;
   /** Only re-check filter↔header hashes above this height. */
@@ -237,16 +242,14 @@ export function createFiltersDownloadModule(
       if (cp !== undefined && !equalBytes(derived[h - next]!, cp)) return null;
     }
 
-    if (next === rangeFrom && rangeFrom % CF_CHECKPT_INTERVAL === 0) {
-      const cp = checkpoints.get(rangeFrom);
-      if (cp === undefined || !equalBytes(derived[0]!, cp)) return null;
-    } else if (next === rangeFrom) {
+    // Height 0 is a multiple of the interval but is not a BIP157 cfcheckpt.
+    if (next === rangeFrom && !checkpoints.has(rangeFrom)) {
       let checkpointInRange = false;
       for (let h = next; h <= stop; h++) {
         if (checkpoints.has(h)) checkpointInRange = true;
       }
       if (!checkpointInRange) return null;
-    } else {
+    } else if (next !== rangeFrom) {
       const prevRow = ctx.db.filterHeaders.get(next - 1);
       if (
         !prevRow ||
@@ -280,7 +283,7 @@ export function createFiltersDownloadModule(
   ): HeightRange | null {
     if (cursor > tipTo) return null;
     let stop = Math.min(cursor + headerBatchSize - 1, tipTo);
-    if (cursor === chainFrom && chainFrom % CF_CHECKPT_INTERVAL !== 0) {
+    if (cursor === chainFrom && !isBip157CheckpointHeight(chainFrom)) {
       const nextCp = nextCheckpointHeight(chainFrom);
       if (nextCp > tipTo) return null;
       stop = Math.min(
@@ -362,10 +365,19 @@ export function createFiltersDownloadModule(
 
             const rows: Array<{ height: number; header: Uint8Array }> = [];
             if (claim.from === chainFrom && chainFrom > 0) {
-              rows.push({
-                height: chainFrom - 1,
-                header: response.previousFilterHeader.slice(),
-              });
+              const prevHeight = chainFrom - 1;
+              const prevHeader = response.previousFilterHeader;
+              const existing = ctx.db.filterHeaders.get(prevHeight);
+              if (existing) {
+                if (!equalBytes(existing.header, prevHeader)) {
+                  throw new Error("cfheaders previous header mismatch");
+                }
+              } else {
+                rows.push({
+                  height: prevHeight,
+                  header: prevHeader.slice(),
+                });
+              }
             }
             for (let i = 0; i < derived.length; i++) {
               rows.push({
@@ -397,7 +409,6 @@ export function createFiltersDownloadModule(
         else await waitForKick(50);
         continue;
       }
-      emitProgress(chainFrom, tipTo, true);
     }
     return false;
   }
@@ -547,32 +558,15 @@ export function createFiltersDownloadModule(
     }
   }
 
-  /**
-   * Prefer the tip gap while behind headers when the prefix has holes.
-   * Full-span missingRanges scans the fat filters table (~250ms); the tip-only
-   * call is cheap (no rows in range).
-   */
-  function filterDownloadQueue(
-    chainFrom: number,
-    tipTo: number,
-  ): HeightRange[] {
-    const maxH = ctx.db.filters.maxHeight();
-    const from =
-      maxH !== null &&
-      maxH < tipTo &&
-      !ctx.db.filters.completeInRange(chainFrom, maxH)
-        ? maxH + 1
-        : chainFrom;
-    return ctx.db.filters
-      .missingRanges(from, tipTo, filterBatchSize)
-      .filter((r) => ctx.db.filterHeaders.get(r.from));
-  }
-
   async function syncFiltersPhase(
     chainFrom: number,
     tipTo: number,
   ): Promise<void> {
-    const queue = filterDownloadQueue(chainFrom, tipTo);
+    const queue = ctx.db.filters.missingRanges(
+      chainFrom,
+      tipTo,
+      filterBatchSize,
+    );
     const missing = queue.reduce(
       (total, range) => total + range.to - range.from + 1,
       0,
@@ -730,7 +724,7 @@ export function createFiltersDownloadModule(
       busy = false;
       if (needsRun && !stopped) {
         needsRun = false;
-        void detachLoop(ctx, "filters-download", runDownload());
+        requestRun("start");
       }
     }
   }
@@ -742,7 +736,7 @@ export function createFiltersDownloadModule(
       kick();
       return;
     }
-    void detachLoop(ctx, "filters-download", runDownload());
+    loopPromise = detachLoop(ctx, "filters-download", runDownload());
   }
 
   return {
@@ -793,6 +787,8 @@ export function createFiltersDownloadModule(
       unsubPeers = undefined;
       kick();
       await pool.closeAll();
+      await loopPromise;
+      loopPromise = undefined;
       diagnosticLog("module stopped");
       ctx.bus.emit("module:status", {
         module: "filters-download",

@@ -120,4 +120,42 @@ describe("filter-session-pool", () => {
     expect(opens).toBe(2);
     await pool.closeAll();
   });
+
+  test("closeAll during open closes the session that finishes later", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let closed = 0;
+    let ran = false;
+    const pool = createFilterSessionPool({
+      connect: unusedConnect,
+      max: 1,
+      openSession: async () => {
+        await held;
+        return {
+          ok: true,
+          value: {
+            ...fakeSession(),
+            close() {
+              closed++;
+            },
+          },
+        };
+      },
+    });
+    pool.setPeers([{ host: "1.1.1.1", port: 8333 }]);
+
+    const lease = pool.withSession(async () => {
+      ran = true;
+      return "ran";
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const closing = pool.closeAll();
+    release();
+    await closing;
+    expect(await lease).toBeNull();
+    expect(ran).toBe(false);
+    expect(closed).toBe(1);
+  });
 });

@@ -60,6 +60,7 @@ export function createFilterSessionPool(options: FilterSessionPoolOptions) {
   let peerOrder: string[] = [];
   let cursor = 0;
   let lastOpenCount = -1;
+  let generation = 0;
 
   function openCount(): number {
     let n = 0;
@@ -166,6 +167,7 @@ export function createFilterSessionPool(options: FilterSessionPoolOptions) {
   async function ensureSession(ep: Endpoint): Promise<FilterSessionApi | null> {
     if (ep.session) return ep.session;
     const startedAt = now();
+    const started = generation;
     let result: Awaited<ReturnType<typeof openSession>>;
     try {
       result = await openSession(ep.peer.host, ep.peer.port, {
@@ -184,6 +186,14 @@ export function createFilterSessionPool(options: FilterSessionPoolOptions) {
       onDiagnostic?.(
         `session open failure peer=${ep.peer.host}:${ep.peer.port} elapsedMs=${Math.max(0, now() - startedAt)} cooldownMs=${coolMs} error=${result.error}`,
       );
+      return null;
+    }
+    if (generation !== started) {
+      try {
+        await Promise.resolve(result.value.close()).catch(() => {});
+      } catch {
+        // ignore
+      }
       return null;
     }
     ep.session = result.value;
@@ -255,6 +265,7 @@ export function createFilterSessionPool(options: FilterSessionPoolOptions) {
   }
 
   async function closeAll(): Promise<void> {
+    generation++;
     const closing: Promise<void>[] = [];
     for (const ep of endpoints.values()) {
       const session = ep.session;
