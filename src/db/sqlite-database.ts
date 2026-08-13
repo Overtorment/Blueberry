@@ -164,7 +164,10 @@ export function createSqliteDatabase(path: string): Database {
             last_probed_at, created_at, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(host, port) DO UPDATE SET
-            services = excluded.services,
+            services = CASE
+              WHEN excluded.services != 0 THEN excluded.services
+              ELSE services
+            END,
             updated_at = excluded.updated_at`,
         )
         .run(

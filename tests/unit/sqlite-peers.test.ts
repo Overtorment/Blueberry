@@ -93,6 +93,20 @@ describe("SqliteDatabase peers", () => {
     db.close();
   });
 
+  test("conflict upsert with services 0 preserves known bits", () => {
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert(basePeer({ services: 64n, alive: true }));
+    db.peers.upsert(basePeer({ services: 0n, alive: false }));
+    expect(db.peers.list()[0]).toMatchObject({
+      services: 64n,
+      alive: true,
+    });
+    expect(db.peers.listAliveWithServices(64n, 10).map((p) => p.host)).toEqual([
+      "1.2.3.4",
+    ]);
+    db.close();
+  });
+
   test("listAlive and mark helpers", () => {
     const db = createSqliteDatabase(":memory:");
     db.peers.upsert(basePeer({ host: "1.1.1.1", alive: true }));

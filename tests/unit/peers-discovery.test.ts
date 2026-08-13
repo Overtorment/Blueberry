@@ -197,6 +197,247 @@ describe("peers-discovery", () => {
     db.close();
   });
 
+  test("DNS reseed does not zero learned service bits on known peers", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 64n,
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: 1,
+    });
+
+    let dnsCalls = 0;
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => {
+          dnsCalls++;
+          return [{ host: "1.1.1.1", port: 8333, services: 0n }];
+        },
+        probe: async () => ({ ok: false, error: "skip" }),
+        concurrency: 1,
+        idleDelayMs: 20,
+        minAliveCompactFilters: 2,
+        reseedIntervalMs: 1,
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => dnsCalls >= 1);
+    const peer = db.peers.list().find((p) => p.host === "1.1.1.1");
+    expect(peer?.services).toBe(64n);
+    expect(db.peers.listWithServices(64n, 10).map((p) => p.host)).toContain(
+      "1.1.1.1",
+    );
+    await mod.stop();
+    db.close();
+  });
+
+  test("probes known peers while DNS bootstrap is still in flight", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "5.5.5.5",
+      port: 8333,
+      services: 64n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    let probed = false;
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: () => new Promise(() => {}),
+        probe: async (host) => {
+          if (host === "5.5.5.5") probed = true;
+          return { ok: false, error: "skip" };
+        },
+        concurrency: 1,
+        idleDelayMs: 20,
+        minAliveCompactFilters: 0,
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => probed);
+    await mod.stop();
+    db.close();
+  });
+
+  test("prefers compact-filter candidates when that pool is thin", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 0n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+    db.peers.upsert({
+      host: "2.2.2.2",
+      port: 8333,
+      services: 64n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: 99,
+    });
+
+    const probed: string[] = [];
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        probe: async (host) => {
+          probed.push(host);
+          return { ok: false, error: "skip" };
+        },
+        concurrency: 1,
+        idleDelayMs: 20,
+        minAliveCompactFilters: 1,
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => probed.length >= 1);
+    expect(probed[0]).toBe("2.2.2.2");
+    await mod.stop();
+    db.close();
+  });
+
+  test("probes never-probed peers even when many dead compact-filter peers exist", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    for (let i = 0; i < 8; i++) {
+      db.peers.upsert({
+        host: `2.2.2.${i}`,
+        port: 8333,
+        services: 64n,
+        alive: false,
+        usedForBlocks: false,
+        lastProbedAt: 1,
+      });
+    }
+    db.peers.upsert({
+      host: "9.9.9.9",
+      port: 8333,
+      services: 0n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    const probed: string[] = [];
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        probe: async (host) => {
+          probed.push(host);
+          return { ok: false, error: "skip" };
+        },
+        concurrency: 4,
+        idleDelayMs: 20,
+        minAliveCompactFilters: 16,
+        now: () => 1_000,
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => probed.includes("9.9.9.9"));
+    await mod.stop();
+    db.close();
+  });
+
+  test("reseeds immediately when compact-filter peers are scarce", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 0n,
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: 1,
+    });
+
+    let dnsCalls = 0;
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => {
+          dnsCalls++;
+          return [{ host: "10.0.0.9", port: 8333, services: 0n }];
+        },
+        probe: async () => ({ ok: false, error: "skip" }),
+        concurrency: 1,
+        idleDelayMs: 20,
+        minAliveCompactFilters: 2,
+        reseedIntervalMs: 60_000,
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => dnsCalls >= 1);
+    await waitFor(() => db.peers.list().some((p) => p.host === "10.0.0.9"));
+    await mod.stop();
+    db.close();
+  });
+
+  test("probes known peers while DNS reseed is still in flight", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 0n,
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: 1,
+    });
+    db.peers.upsert({
+      host: "2.2.2.2",
+      port: 8333,
+      services: 0n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    let probedNever = false;
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: () => new Promise(() => {}),
+        probe: async (host) => {
+          if (host === "2.2.2.2") probedNever = true;
+          return { ok: false, error: "skip" };
+        },
+        concurrency: 1,
+        idleDelayMs: 20,
+        minAliveCompactFilters: 2,
+        reseedIntervalMs: 0,
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => probedNever);
+    await mod.stop();
+    db.close();
+  });
+
   test("default probe path calls net.connect", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
@@ -262,6 +503,92 @@ describe("peers-discovery", () => {
     await waitFor(() => db.peers.list()[0]?.lastProbedAt === 12345);
     expect(db.peers.list()[0]?.alive).toBe(false);
     await mod.stop();
+    db.close();
+  });
+
+  test("does not immediately re-probe a peer that just failed", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 0n,
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    let probes = 0;
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        probe: async () => {
+          probes++;
+          return { ok: false, error: "down" };
+        },
+        concurrency: 1,
+        idleDelayMs: 20,
+        probeTimeoutMs: 180,
+        minAliveCompactFilters: 0,
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => probes >= 1);
+    const atFirst = probes;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(probes).toBe(atFirst);
+    await waitFor(() => probes > atFirst);
+    await mod.stop();
+    db.close();
+  });
+
+  test("in-flight probe after stop does not persist results", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 0n,
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    const opens: number[] = [];
+    bus.on("peers:sockets", (p) => {
+      if (p.kind === "probe") opens.push(p.open);
+    });
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        probe: async () => {
+          await gate;
+          return { ok: false, error: "down" };
+        },
+        concurrency: 1,
+        idleDelayMs: 50,
+        now: () => 12345,
+        minAliveCompactFilters: 0,
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => opens.includes(1));
+    await mod.stop();
+    release();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(db.peers.list()[0]?.lastProbedAt).toBeNull();
+    expect(db.peers.list()[0]?.alive).toBe(true);
     db.close();
   });
 

@@ -29,31 +29,69 @@ function shuffleInPlace<T>(items: T[], random: () => number): T[] {
   return items;
 }
 
+const DEFAULT_SEED_TIMEOUT_MS = 3_000;
+
+async function withTimeout<T>(
+  task: Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return task;
+  return await new Promise<T>((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs);
+    timer.unref?.();
+    task.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
+}
+
+async function resolveFamily(
+  task: Promise<string[]>,
+  timeoutMs: number,
+): Promise<string[]> {
+  return withTimeout(
+    Promise.resolve(task).catch(() => [] as string[]),
+    timeoutMs,
+    [],
+  );
+}
+
 export async function resolveSeedPeers(
   seeds: readonly string[],
   options: {
     port: number;
     resolver: DnsResolver;
     random?: () => number;
+    timeoutMs?: number;
   },
 ): Promise<PeerCandidate[]> {
   const random = options.random ?? Math.random;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SEED_TIMEOUT_MS;
+  const resolved = await Promise.all(
+    seeds.map(async (seed) => {
+      const [a, b] = await Promise.all([
+        resolveFamily(options.resolver.resolve4(seed), timeoutMs),
+        resolveFamily(options.resolver.resolve6(seed), timeoutMs),
+      ]);
+      return { v4: a, v6: b };
+    }),
+  );
   const v4: PeerCandidate[] = [];
   const v6: PeerCandidate[] = [];
-  for (const seed of seeds) {
-    try {
-      const [a, b] = await Promise.all([
-        options.resolver.resolve4(seed).catch(() => [] as string[]),
-        options.resolver.resolve6(seed).catch(() => [] as string[]),
-      ]);
-      for (const host of a) {
-        v4.push({ host, port: options.port, services: 0n });
-      }
-      for (const host of b) {
-        v6.push({ host, port: options.port, services: 0n });
-      }
-    } catch {
-      // ignore whole-seed failures
+  for (const { v4: a, v6: b } of resolved) {
+    for (const host of a) {
+      v4.push({ host, port: options.port, services: 0n });
+    }
+    for (const host of b) {
+      v6.push({ host, port: options.port, services: 0n });
     }
   }
   return [...shuffleInPlace(v4, random), ...shuffleInPlace(v6, random)];
