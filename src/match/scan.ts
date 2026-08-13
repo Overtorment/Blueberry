@@ -1,14 +1,14 @@
 import { matchAnyBasicFilters } from "bip158";
 import type { Database } from "../db/types.ts";
 
-/** Rows loaded from SQLite per outer iteration / matched in one bip158 call. */
+/** Rows loaded from SQLite per outer iteration. */
 export const MATCH_FILTER_BATCH_SIZE = 1000;
 
 /**
- * Sync match slice size. Default = batch size so we hit the bip158 multi-filter
- * fast path once per load, then yield for the TUI.
+ * Sync match slice before yielding to the event loop.
+ * Smaller than the DB batch — matchAnyBasicFilters is a per-filter JS loop.
  */
-export const MATCH_CHUNK_SIZE = MATCH_FILTER_BATCH_SIZE;
+export const MATCH_CHUNK_SIZE = 50;
 
 /** Extra sleep after each chunk; 0 = setTimeout(0) yield only (tests pass 0). */
 export const MATCH_BATCH_GAP_MS = 0;

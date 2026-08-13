@@ -200,6 +200,36 @@ describe("filters-matching", () => {
     db.close();
   });
 
+  test("idle filters:progress emits matching:progress with new total before scanning", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const wallet = createWallet(db, { secret: ABANDON_MNEMONIC, addressGap: 4 });
+    const junk = new Uint8Array([0x00, 0x14, ...new Uint8Array(20).fill(0xab)]);
+    appendFilter(db, 1, "01".repeat(32), [junk]);
+    db.filters.markScanned([1]);
+
+    const events: Array<{ scanned: number; total: number }> = [];
+    bus.on("matching:progress", (p) => {
+      events.push({ scanned: p.scanned, total: p.total });
+    });
+
+    const mod = createFiltersMatchingModule(
+      { bus, db },
+      { wallet, batchSize: 1, batchGapMs: 0, yieldFn: async () => {} },
+    );
+    await mod.start();
+    await waitFor(() => events.length >= 1);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events[0]).toEqual({ scanned: 1, total: 1 });
+
+    appendFilter(db, 2, "02".repeat(32), [junk]);
+    bus.emit("filters:progress", { at: 1, downloaded: 2, total: 2 });
+    await waitFor(() => db.filters.countScanned() === 2);
+    expect(events).toContainEqual({ scanned: 1, total: 2 });
+    await mod.stop();
+    db.close();
+  });
+
   test("idle resumes on filters:progress; busy kick still drains new work", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");

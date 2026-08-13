@@ -170,7 +170,6 @@ export function createFiltersMatchingModule(
       loadedGaps = wallet.gaps();
       unsubProgress = ctx.bus.on("filters:progress", () => {
         if (stopped) return;
-        totalCount = ctx.db.filters.count();
         if (busy) {
           needsRun = true;
           return;
