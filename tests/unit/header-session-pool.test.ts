@@ -109,4 +109,60 @@ describe("HeaderSessionPool", () => {
     expect(opens).toBe(2);
     await pool.closeAll();
   });
+
+  test("closeAll drops IPv6 sessions", async () => {
+    let closed = 0;
+    const pool = createHeaderSessionPool({
+      openSession: async () => ({
+        startHeight: 1,
+        requestHeaders: async () => ({ startHeight: 1, headers: [] }),
+        close: async () => {
+          closed++;
+        },
+      }),
+    });
+    const host = "2001:db8::1";
+    const result = await pool.fetchBatch(host, 8333, {
+      locatorHashes: [new Uint8Array(32)],
+    });
+    expect(result.ok).toBe(true);
+    expect(pool.has(host, 8333)).toBe(true);
+    await pool.closeAll();
+    expect(pool.has(host, 8333)).toBe(false);
+    expect(closed).toBe(1);
+  });
+
+  test("closeAll does not leak a session that was still opening", async () => {
+    let releaseOpen!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseOpen = r;
+    });
+    let hitOpen = false;
+    let closed = 0;
+    const pool = createHeaderSessionPool({
+      openSession: async () => {
+        hitOpen = true;
+        await gate;
+        return {
+          startHeight: 1,
+          requestHeaders: async () => ({ startHeight: 1, headers: [] }),
+          close: async () => {
+            closed++;
+          },
+        };
+      },
+    });
+
+    const fetchP = pool.fetchBatch("2001:db8::2", 8333, {
+      locatorHashes: [new Uint8Array(32)],
+    });
+    await waitFor(() => hitOpen);
+    const closeP = pool.closeAll();
+    releaseOpen();
+    const result = await fetchP;
+    await closeP;
+    expect(result.ok).toBe(false);
+    expect(pool.has("2001:db8::2", 8333)).toBe(false);
+    expect(closed).toBe(1);
+  });
 });

@@ -236,6 +236,7 @@ export function createHeaderSessionPool(
   const sessions = new Map<string, LiveSession>();
   let opening = 0;
   let lastOpenCount = -1;
+  let epoch = 0;
 
   function openCount(): number {
     return sessions.size + opening;
@@ -340,6 +341,7 @@ export function createHeaderSessionPool(
       const stopHash = options.stopHash ?? ZERO_HASH;
 
       let session = sessions.get(key);
+      const started = epoch;
       try {
         if (!session) {
           opening++;
@@ -347,6 +349,10 @@ export function createHeaderSessionPool(
           try {
             session = await openSession(host, port, connectTimeoutMs);
             sessions.set(key, session);
+            if (epoch !== started) {
+              await drop(host, port);
+              return { ok: false, error: "session closed" };
+            }
           } finally {
             opening--;
             notifyOpenCount();
@@ -385,13 +391,9 @@ export function createHeaderSessionPool(
     drop,
 
     async closeAll() {
-      const keys = [...sessions.keys()];
-      await Promise.all(
-        keys.map(async (key) => {
-          const [host, portStr] = key.split(":");
-          await drop(host!, Number(portStr));
-        }),
-      );
+      epoch++;
+      const open = [...sessions.values()];
+      await Promise.all(open.map((session) => drop(session.host, session.port)));
       notifyOpenCount();
     },
   };
