@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { buildBasicFilter, hexToBytes } from "bip158";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
-import { scanFiltersForMatches } from "../../src/match/scan.ts";
+import {
+  MATCH_CHUNK_SIZE,
+  MATCH_FILTER_BATCH_SIZE,
+  scanFiltersForMatches,
+} from "../../src/match/scan.ts";
 import { deriveWatchWallet } from "../../src/wallet/derive.ts";
 
 const MNEMONIC =
@@ -156,5 +160,9 @@ describe("scanFiltersForMatches", () => {
     }
     expect(progress.at(-1)).toEqual({ scanned: 6, total: 6 });
     db.close();
+  });
+
+  test("default chunk is smaller than the DB batch so matching can yield", () => {
+    expect(MATCH_CHUNK_SIZE).toBeLessThan(MATCH_FILTER_BATCH_SIZE);
   });
 });
