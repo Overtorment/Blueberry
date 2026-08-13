@@ -347,6 +347,13 @@ describe("chain-headers", () => {
     bus.on("headers:progress", (p) => {
       events.push({ downloaded: p.downloaded, total: p.total });
     });
+    const wakes: string[] = [];
+    bus.on("wallet:txs", () => {
+      wakes.push("wallet:txs");
+    });
+    bus.on("blocks:progress", () => {
+      wakes.push("blocks:progress");
+    });
 
     let calls = 0;
     const mod = createChainHeadersModule(
@@ -386,6 +393,8 @@ describe("chain-headers", () => {
     expect(db.matchedBlocks.count()).toBe(0);
     expect(db.blocks.has(oldTip.height)).toBe(false);
     expect(db.transactions.list()).toEqual([]);
+    expect(wakes).toContain("wallet:txs");
+    expect(wakes).toContain("blocks:progress");
     await mod.stop();
     db.close();
   });

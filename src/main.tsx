@@ -240,7 +240,8 @@ async function startApp(db: Database): Promise<void> {
     }
   }
 
-  // Paint TUI first so boot isn't blocked by header sync / DNS.
+  // TUI hydrates from SQLite in start(), then React mounts. Domain modules
+  // start after. First paint must not wait on domain events (avoids 0/0).
   const [tui, ...domainModules] = modules;
   await startModule(tui!);
 
