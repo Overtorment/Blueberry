@@ -1,6 +1,7 @@
 import {
   Networks,
   Protocol,
+  ProtocolClosedError,
   answerPing,
   completeVersionHandshake,
   decodeTransaction,
@@ -24,8 +25,26 @@ export type BroadcastTxV2Options = {
   signal?: AbortSignal;
 };
 
+export function decodeBroadcastTx(txHex: string): Transaction {
+  try {
+    return decodeTransaction(hexToBytes(txHex));
+  } catch {
+    throw new Error("invalid transaction hex");
+  }
+}
+
 function abortError(signal: AbortSignal | undefined, fallback: string): Error {
   return signal?.reason instanceof Error ? signal.reason : new Error(fallback);
+}
+
+/** Close / EOF after we already sent `tx` — not a protocol/auth failure. */
+function isSessionGone(err: unknown): boolean {
+  if (err instanceof ProtocolClosedError) return true;
+  if (!(err instanceof Error)) return false;
+  const message = err.message;
+  return (
+    message.includes("unexpected EOF") || message.includes("closed duplex")
+  );
 }
 
 /** Close duplex when `signal` aborts or `ms` elapses (unblocks bip324 reads). */
@@ -75,12 +94,7 @@ export async function broadcastTxV2(
   const ackTimeoutMs = options.ackTimeoutMs ?? 15_000;
   const signal = options.signal;
 
-  let wireTx: Transaction;
-  try {
-    wireTx = decodeTransaction(hexToBytes(txHex));
-  } catch {
-    throw new Error("invalid transaction hex");
-  }
+  const wireTx = decodeBroadcastTx(txHex);
   const txidInternal = transactionId(wireTx);
 
   if (signal?.aborted) {
@@ -118,34 +132,18 @@ export async function broadcastTxV2(
     disarmHandshake();
   }
 
+  let ackTimedOut = false;
+  const disarmAck = armDuplexDeadline(duplex, signal, ackTimeoutMs, () => {
+    ackTimedOut = true;
+  });
   try {
     await protocol.writeMessage({ command: "tx", payload: wireTx });
-
-    const deadline = Date.now() + ackTimeoutMs;
-    while (Date.now() < deadline) {
+    for (;;) {
       if (signal?.aborted) {
         throw abortError(signal, "broadcast aborted");
       }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-
-      // Closing unblocks readMessage when the ack budget expires (a bare
-      // Promise.race leaves the read queued and deadlocks protocol.close()).
-      const timer = setTimeout(() => {
-        void protocol.close().catch(() => {});
-      }, remaining);
-      timer.unref?.();
-      const onAbort = () => {
-        clearTimeout(timer);
-        void protocol.close().catch(() => {});
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-
       try {
         const msg = await protocol.readMessage();
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-
         if (
           msg.command === "opaque" &&
           msg.type.kind === "long" &&
@@ -161,19 +159,18 @@ export async function broadcastTxV2(
         }
         await answerPing(protocol, msg);
       } catch (err) {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
         if (signal?.aborted) {
           throw abortError(signal, "broadcast aborted");
         }
         if (err instanceof Error && err.message === "peer rejected transaction") {
           throw err;
         }
-        // Timeout close or peer hang-up without reject ⇒ success.
-        return;
+        if (ackTimedOut || isSessionGone(err)) return;
+        throw err;
       }
     }
   } finally {
+    disarmAck();
     try {
       await protocol.close();
     } catch {
