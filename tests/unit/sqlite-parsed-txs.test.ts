@@ -61,7 +61,22 @@ describe("parsed blocks + transactions", () => {
       ["a", 42],
       ["b", 50],
     ]);
+    expect(db.transactions.fingerprint()).toEqual({
+      count: 2,
+      netDeltaSum: 92,
+      newestTxid: "a".repeat(64),
+    });
 
+    db.close();
+  });
+
+  test("transaction fingerprint is empty on a fresh database", () => {
+    const db = createSqliteDatabase(":memory:");
+    expect(db.transactions.fingerprint()).toEqual({
+      count: 0,
+      netDeltaSum: 0,
+      newestTxid: null,
+    });
     db.close();
   });
 });

@@ -7,6 +7,8 @@ export const APP_STRIP_HEIGHT = 6;
 export const APP_BALANCE_HEIGHT = 5;
 /** Panel border (2) + Panel padding (2). */
 export const PANEL_CHROME_ROWS = 4;
+/** Must match `ActionBar` overlay height. Reserved so txs are not painted under it. */
+export const APP_ACTION_BAR_HEIGHT = 5;
 
 /**
  * How many tx rows fit in the Transactions panel content area.
@@ -23,6 +25,7 @@ export function txListCapacity(
     APP_STRIP_HEIGHT -
     APP_BALANCE_HEIGHT -
     PANEL_CHROME_ROWS -
+    APP_ACTION_BAR_HEIGHT -
     Math.max(0, reservedLines);
   return Math.max(0, content);
 }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import encodeQR from "qr";
-import { qrAsciiLines } from "../../src/tui/qr-ascii.ts";
+import { qrAsciiLines, qrAsciiLinesCompact, qrAsciiLinesFitting } from "../../src/tui/qr-ascii.ts";
 
 describe("qrAsciiLines", () => {
   test("each raw module becomes ██ or two spaces; quiet zone empty", () => {
@@ -24,5 +24,17 @@ describe("qrAsciiLines", () => {
 
     expect(lines[0]!.trim()).toBe("");
     expect(lines[lines.length - 1]!.trim()).toBe("");
+  });
+});
+
+describe("qrAsciiLinesFitting", () => {
+  test("uses full modules when they fit; compact when they do not", () => {
+    const addr = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu";
+    const full = qrAsciiLines(addr);
+    const compact = qrAsciiLinesCompact(addr);
+    expect(full[0]!.length).toBeGreaterThan(40);
+    expect(full.length).toBeGreaterThan(24);
+    expect(qrAsciiLinesFitting(addr, 200, 200)).toEqual(full);
+    expect(qrAsciiLinesFitting(addr, 40, 20)).toEqual(compact);
   });
 });

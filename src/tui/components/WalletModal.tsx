@@ -5,12 +5,12 @@ import type { BuildSendResult } from "../../wallet/build-send-tx.ts";
 import { isAddressValid } from "../../wallet/is-address-valid.ts";
 import {
   cancelBroadcast,
-  requestBroadcast,
+  startUiBroadcast,
 } from "../broadcast-actions.ts";
 import { fitCryptoPsbtUrQr } from "../fit-ur-qr.ts";
 import { buildActiveSendTx } from "../send-context.ts";
 import { THEME } from "../theme.ts";
-import { qrAsciiLines, qrAsciiLinesCompact } from "../qr-ascii.ts";
+import { qrAsciiLinesFitting, qrAsciiLinesCompact } from "../qr-ascii.ts";
 import { useBroadcast, useBroadcastStore } from "../use-broadcast.ts";
 import { useReceiveAddress } from "../use-receive-address.ts";
 import { useUiRouteStore } from "../use-ui-route.ts";
@@ -54,7 +54,9 @@ function ReceiveBody(props: { address: string; qrLines: string[] }) {
           </text>
         ))}
       </box>
-      <text fg={THEME.accentMagenta}>{props.address}</text>
+      <text fg={THEME.accentMagenta} wrapMode="none">
+        {props.address}
+      </text>
     </box>
   );
 }
@@ -108,16 +110,23 @@ function AnimatedUrQr(props: { psbtHex: string }) {
   const maxQrW = Math.max(16, Math.floor(termW * 0.95) - 6);
   const maxQrH = Math.max(8, Math.floor(termH * 0.95) - 7);
 
-  const { parts } = useMemo(
-    () => fitCryptoPsbtUrQr(props.psbtHex, maxQrW, maxQrH),
-    [props.psbtHex, maxQrW, maxQrH],
-  );
+  const { parts } = useMemo(() => {
+    try {
+      return fitCryptoPsbtUrQr(props.psbtHex, maxQrW, maxQrH);
+    } catch {
+      return { parts: [] as string[], capacity: 0 };
+    }
+  }, [props.psbtHex, maxQrW, maxQrH]);
 
   const part = parts[index] ?? parts[0] ?? "";
-  const qrLines = useMemo(
-    () => (part ? qrAsciiLinesCompact(part) : []),
-    [part],
-  );
+  const qrLines = useMemo(() => {
+    if (!part) return [];
+    try {
+      return qrAsciiLinesCompact(part);
+    } catch {
+      return [];
+    }
+  }, [part]);
   const qrW = qrLines[0]?.length ?? 0;
   const qrH = qrLines.length;
 
@@ -228,16 +237,10 @@ function SignedTxPreviewBody(props: {
     broadcast.phase === "waiting-peers" || broadcast.phase === "attempt";
 
   useKeyboard((key) => {
-    if (key.name === "return" || key.name === "enter") {
-      if (busy) return;
-      if (broadcast.phase === "success" || broadcast.phase === "error") {
-        broadcastStore?.reset();
-      }
-      if (broadcast.phase === "idle" || broadcast.phase === "error") {
-        const id = requestBroadcast(props.txHex);
-        broadcastStore?.begin(id);
-      }
-    }
+    if (key.name !== "return" && key.name !== "enter") return;
+    if (key.repeated) return;
+    if (!broadcastStore) return;
+    startUiBroadcast(broadcastStore, props.txHex);
   });
 
   if (busy || broadcast.phase === "success" || broadcast.phase === "error") {
@@ -641,9 +644,9 @@ function SendBody(props: {
 export function WalletModal({ kind }: WalletModalProps) {
   const recv = useReceiveAddress();
   const uiRouteStore = useUiRouteStore();
-  const broadcast = useBroadcast();
   const broadcastStore = useBroadcastStore();
   const { utxos } = useWalletTxs();
+  const { width: termW, height: termH } = useTerminalDimensions();
   const [sendStep, setSendStep] = useState<SendStep>("utxos");
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [details, setDetails] = useState<SendDetails | null>(null);
@@ -652,11 +655,6 @@ export function WalletModal({ kind }: WalletModalProps) {
   const accent =
     kind === "receive" ? THEME.accentMagenta : THEME.accentCyan;
   const titleLabel = kind === "receive" ? "Receive" : "Send";
-  const broadcastBusy =
-    kind === "send" &&
-    sendStep === "preview" &&
-    preview?.kind === "signed" &&
-    (broadcast.phase === "waiting-peers" || broadcast.phase === "attempt");
 
   useEffect(() => {
     if (kind === "send") {
@@ -670,34 +668,41 @@ export function WalletModal({ kind }: WalletModalProps) {
   }, [kind, broadcastStore]);
 
   useKeyboard((key) => {
-    if (key.name === "escape" || key.name === "esc") {
-      if (utxoRenaming) return;
-      if (broadcastBusy && broadcast.id) {
-        cancelBroadcast(broadcast.id);
-        return;
-      }
-      if (
-        broadcast.phase === "success" ||
-        broadcast.phase === "error"
-      ) {
-        broadcastStore?.reset();
-      }
-      uiRouteStore?.close();
+    if (key.name !== "escape" && key.name !== "esc") return;
+    if (utxoRenaming) return;
+    const snap = broadcastStore?.get();
+    const canceling =
+      kind === "send" &&
+      sendStep === "preview" &&
+      preview?.kind === "signed" &&
+      (snap?.phase === "waiting-peers" || snap?.phase === "attempt");
+    if (canceling && snap?.id) {
+      cancelBroadcast(snap.id);
+      return;
     }
+    if (snap?.phase === "success" || snap?.phase === "error") {
+      broadcastStore?.reset();
+    }
+    uiRouteStore?.close();
   });
 
-  const qrLines = useMemo(
-    () =>
-      kind === "receive" && recv.address ? qrAsciiLines(recv.address) : [],
-    [kind, recv.address],
-  );
+  const qrLines = useMemo(() => {
+    if (kind !== "receive" || !recv.address) return [];
+    return qrAsciiLinesFitting(
+      recv.address,
+      Math.max(8, termW - 4),
+      Math.max(4, termH - 6),
+    );
+  }, [kind, recv.address, termW, termH]);
   const qrWidth = qrLines[0]?.length ?? 0;
   const qrHeight = qrLines.length;
   const receiveWidth = recv.address
     ? Math.max(qrWidth + 4, recv.address.length + 4)
     : 44;
-  const receiveHeight =
-    qrHeight > 0 ? qrHeight + 1 /* address */ + 1 /* gap */ + 4 /* pad+border */ : 8;
+  const receiveHeight = Math.min(
+    termH,
+    qrHeight > 0 ? qrHeight + 1 /* address */ + 1 /* gap */ + 4 /* pad+border */ : 8,
+  );
 
   const sendPsbtPreview = kind === "send" && sendStep === "preview" && preview?.kind === "psbt";
   const sendModalWidth = sendPsbtPreview ? "95%" : "80%";

@@ -57,3 +57,18 @@ export function qrCompactSize(
     height: Math.ceil(modules / 2),
   };
 }
+
+/**
+ * Full-module QR when it fits `maxWidth` × `maxHeight`; compact otherwise.
+ * Receive uses this so a 24-row terminal still shows a scannable code + address.
+ */
+export function qrAsciiLinesFitting(
+  text: string,
+  maxWidth: number,
+  maxHeight: number,
+): string[] {
+  const full = qrAsciiLines(text);
+  const fullW = full[0]?.length ?? 0;
+  if (full.length <= maxHeight && fullW <= maxWidth) return full;
+  return qrAsciiLinesCompact(text);
+}

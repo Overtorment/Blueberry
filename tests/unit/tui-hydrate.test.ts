@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { hexToBytes } from "bip158";
 import { encodeBlockHeader } from "bitcoin-headers";
+import { Transaction } from "bitcoinjs-lib";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 import { createBlocksMatchedStore } from "../../src/tui/blocks-matched-store.ts";
 import { createFiltersProgressStore } from "../../src/tui/filters-progress-store.ts";
 import { createHeadersProgressStore } from "../../src/tui/headers-progress-store.ts";
+import { createReceiveAddressStore } from "../../src/tui/receive-address-store.ts";
 import {
   hydrateBlocks,
   hydrateFilters,
@@ -17,6 +19,8 @@ import {
 import { createMatchingProgressStore } from "../../src/tui/matching-progress-store.ts";
 import { createPeerSocketsStore } from "../../src/tui/peer-sockets-store.ts";
 import { createWalletTxsStore } from "../../src/tui/wallet-txs-store.ts";
+import { saveWatchGaps } from "../../src/wallet/watch-gaps.ts";
+import { createWallet } from "../../src/wallet/wallet.ts";
 
 function dummyHeader(): Uint8Array {
   return encodeBlockHeader({
@@ -279,6 +283,95 @@ describe("tui hydrate", () => {
     expect(walletTxsStore.get().at).toBe(9);
     expect(walletTxsStore.get().balanceSats).toBe(42n);
     expect(walletTxsStore.get().blocksTotal).toBe(1);
+    db.close();
+  });
+
+  test("wallet:txs with unchanged tx set only refreshes parse counts", () => {
+    const db = createSqliteDatabase(":memory:");
+    db.blocks.insert({
+      height: 1,
+      blockHashInternalHex: "11".repeat(32),
+      block: new Uint8Array([1]),
+    });
+    db.blocks.insert({
+      height: 2,
+      blockHashInternalHex: "22".repeat(32),
+      block: new Uint8Array([2]),
+    });
+    db.transactions.upsert({
+      txid: "cd".repeat(32),
+      height: 1,
+      txIndex: 0,
+      blockHashInternalHex: "11".repeat(32),
+      tx: new Uint8Array([0x00]),
+      netDeltaSats: 42,
+    });
+    const walletTxsStore = createWalletTxsStore();
+    hydrateWallet(db, walletTxsStore, undefined, undefined, 1);
+    const txs = walletTxsStore.get().txs;
+    expect(txs).toHaveLength(1);
+
+    db.parsedBlocks.mark(1);
+    hydrateWallet(db, walletTxsStore, undefined, undefined, 2);
+    expect(walletTxsStore.get().txs).toBe(txs);
+    expect(walletTxsStore.get().blocksParsed).toBe(1);
+    expect(walletTxsStore.get().blocksTotal).toBe(2);
+    expect(walletTxsStore.get().balanceSats).toBe(42n);
+    db.close();
+  });
+
+  test("wallet hydrate rebuilds when net delta changes", () => {
+    const db = createSqliteDatabase(":memory:");
+    db.transactions.upsert({
+      txid: "cd".repeat(32),
+      height: 1,
+      txIndex: 0,
+      blockHashInternalHex: "11".repeat(32),
+      tx: new Uint8Array([0x00]),
+      netDeltaSats: 42,
+    });
+    const walletTxsStore = createWalletTxsStore();
+    hydrateWallet(db, walletTxsStore, undefined, undefined, 1);
+    const txs = walletTxsStore.get().txs;
+    db.transactions.setNetDelta("cd".repeat(32), 100);
+    hydrateWallet(db, walletTxsStore, undefined, undefined, 2);
+    expect(walletTxsStore.get().txs).not.toBe(txs);
+    expect(walletTxsStore.get().balanceSats).toBe(100n);
+    db.close();
+  });
+
+  test("cheap wallet hydrate still refreshes receive when the watch window was exhausted", () => {
+    const MNEMONIC =
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const db = createSqliteDatabase(":memory:");
+    const wallet = createWallet(db, { secret: MNEMONIC, addressGap: 1 });
+    const script = wallet.snapshot().scripts[0]!;
+    const tx = new Transaction();
+    tx.version = 2;
+    tx.addInput(Buffer.alloc(32), 0xffffffff);
+    tx.addOutput(script, 1000n);
+    db.transactions.upsert({
+      txid: tx.getId(),
+      height: 1,
+      txIndex: 0,
+      blockHashInternalHex: "11".repeat(32),
+      tx: tx.toBuffer(),
+      netDeltaSats: 1000,
+    });
+    const walletTxsStore = createWalletTxsStore();
+    const receive = createReceiveAddressStore();
+    hydrateWallet(db, walletTxsStore, receive, wallet, 1);
+    expect(receive.get().address).toBeNull();
+
+    saveWatchGaps(db, { external: 4, internal: 4 });
+    wallet.refresh();
+    const txs = walletTxsStore.get().txs;
+    hydrateWallet(db, walletTxsStore, receive, wallet, 2);
+    expect(walletTxsStore.get().txs).toBe(txs);
+    const index1 = wallet
+      .snapshot()
+      .addresses.find((a) => !a.change && a.index === 1);
+    expect(receive.get().address).toBe(index1?.address ?? null);
     db.close();
   });
 });

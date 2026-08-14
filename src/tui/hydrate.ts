@@ -6,7 +6,7 @@ import type { HeadersProgressStore } from "./headers-progress-store.ts";
 import type { MatchingProgressStore } from "./matching-progress-store.ts";
 import type { PeerSocketsStore } from "./peer-sockets-store.ts";
 import type { ReceiveAddressStore } from "./receive-address-store.ts";
-import type { WalletTxsStore } from "./wallet-txs-store.ts";
+import type { WalletTxsSnapshot, WalletTxsStore } from "./wallet-txs-store.ts";
 import { snapshotFromDb } from "./wallet-txs-store.ts";
 
 export type HydrateStores = {
@@ -108,6 +108,16 @@ export function hydrateWalletBlockCounts(
   );
 }
 
+function txSetUnchanged(db: Database, snap: WalletTxsSnapshot): boolean {
+  if (snap.at === null) return false;
+  const fp = db.transactions.fingerprint();
+  return (
+    fp.count === snap.txs.length &&
+    BigInt(fp.netDeltaSum) === snap.balanceSats &&
+    fp.newestTxid === (snap.txs[0]?.txid ?? null)
+  );
+}
+
 export function hydrateWallet(
   db: Database,
   walletTxsStore: WalletTxsStore,
@@ -115,6 +125,20 @@ export function hydrateWallet(
   wallet: Wallet | undefined,
   at: number,
 ): void {
+  const parsed = db.parsedBlocks.count();
+  const total = db.blocks.count();
+  if (txSetUnchanged(db, walletTxsStore.get())) {
+    walletTxsStore.setBlockCounts(parsed, total, at);
+    // Gap growth can open a receive address without changing the tx set.
+    if (
+      receiveAddressStore &&
+      wallet &&
+      receiveAddressStore.get().address === null
+    ) {
+      receiveAddressStore.refresh(db, wallet);
+    }
+    return;
+  }
   walletTxsStore.apply(snapshotFromDb(db, at, Date.now(), wallet));
   if (receiveAddressStore && wallet) {
     receiveAddressStore.refresh(db, wallet);
