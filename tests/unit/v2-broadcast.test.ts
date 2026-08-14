@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_CONTENTS_LEN,
   Networks,
   Protocol,
   encodeTransaction,
@@ -34,10 +35,10 @@ function sampleTx(): Transaction {
   };
 }
 
-/** Minimal BIP-324 responder: handshake, capture tx, optional inv/reject. */
+/** Minimal BIP-324 responder: handshake, capture tx, optional inv/reject/close/garbage. */
 async function runPeer(
   server: ByteDuplex,
-  afterTx: "inv" | "silent" | "reject",
+  afterTx: "inv" | "silent" | "reject" | "close" | "garbage",
 ): Promise<Transaction> {
   const protocol = await Protocol.connect(server, {
     role: "responder",
@@ -74,6 +75,13 @@ async function runPeer(
         type: { kind: "long", command: "reject" },
         payload: new Uint8Array([0]),
       });
+    } else if (afterTx === "close") {
+      await protocol.close();
+    } else if (afterTx === "garbage") {
+      // Session keys randomize the decrypted length; this is enough for a
+      // max-size packet or the contents-length cap, so AEAD/length errors
+      // surface instead of stalling until ack timeout.
+      await server.write(new Uint8Array(MAX_CONTENTS_LEN + 32).fill(7));
     }
     return msg.payload;
   }
@@ -148,6 +156,41 @@ describe("broadcastTxV2", () => {
     await client.close();
     await server.close();
   }, 2_000);
+
+  test("succeeds when peer hangs up after receiving tx", async () => {
+    const [client, server] = pairedByteDuplexes();
+    const tx = sampleTx();
+    const txHex = Buffer.from(encodeTransaction(tx)).toString("hex");
+    const peer = runPeer(server, "close");
+    await broadcastTxV2(client, txHex, {
+      port: 8333,
+      name: APP_NAME,
+      version: APP_VERSION,
+      ackTimeoutMs: 2_000,
+    });
+    const got = await peer;
+    expect(equalBytes(transactionId(got), transactionId(tx))).toBe(true);
+
+    await client.close();
+    await server.close();
+  });
+
+  test("fails when peer sends garbage after tx", async () => {
+    const [client, server] = pairedByteDuplexes();
+    const txHex = Buffer.from(encodeTransaction(sampleTx())).toString("hex");
+    const peer = runPeer(server, "garbage");
+    await expect(
+      broadcastTxV2(client, txHex, {
+        port: 8333,
+        name: APP_NAME,
+        version: APP_VERSION,
+        ackTimeoutMs: 2_000,
+      }),
+    ).rejects.toThrow(/authentication|contents length/i);
+    await peer;
+    await client.close();
+    await server.close();
+  });
 
   test("fails when peer sends reject", async () => {
     const [client, server] = pairedByteDuplexes();

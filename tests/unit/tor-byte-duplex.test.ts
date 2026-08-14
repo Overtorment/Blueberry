@@ -56,4 +56,26 @@ describe("torStreamToByteDuplex", () => {
     expect(isClosed()).toBe(true);
     expect((await duplex.read(4)).length).toBe(0);
   });
+
+  test("skips empty chunks instead of treating them as EOF", async () => {
+    const { stream } = fakeTorStream([
+      new Uint8Array(0),
+      Uint8Array.of(1, 2),
+    ]);
+    const duplex = torStreamToByteDuplex(stream);
+    expect([...(await duplex.read(2))]).toEqual([1, 2]);
+  });
+
+  test("close unblocks a pending read with EOF", async () => {
+    const duplex = torStreamToByteDuplex({
+      outer: {
+        readable: new ReadableStream<Uint8Array>(),
+        writable: new WritableStream<Uint8Array>(),
+      },
+      close: () => {},
+    });
+    const pending = duplex.read(8);
+    await duplex.close();
+    expect((await pending).length).toBe(0);
+  });
 });

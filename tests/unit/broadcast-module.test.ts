@@ -275,4 +275,82 @@ describe("broadcast module", () => {
     expect(disposeDone).toBe(true);
     db.close();
   });
+
+  test("cancel during the last attempt is not reported as exhausted attempts", async () => {
+    const db = createSqliteDatabase(":memory:");
+    upsertAlive(db, "1.1.1.1");
+    const bus = createMessageBus();
+    const txHex = Buffer.from(encodeTransaction(sampleTx())).toString("hex");
+
+    const mod = createBroadcastModule(
+      { bus, db },
+      {
+        maxAttempts: 1,
+        connect: async (_host, _port, signal) => {
+          await new Promise<never>((_, reject) => {
+            const onAbort = () => {
+              reject(
+                signal.reason instanceof Error
+                  ? signal.reason
+                  : new Error("cancelled"),
+              );
+            };
+            if (signal.aborted) {
+              onAbort();
+              return;
+            }
+            signal.addEventListener("abort", onAbort, { once: true });
+          });
+          throw new Error("unreachable");
+        },
+      },
+    );
+    await mod.start();
+
+    const done = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      bus.on("broadcast:done", (p) => resolve(p));
+    });
+    bus.emit("broadcast:request", { id: "6", txHex });
+    await Bun.sleep(20);
+    bus.emit("broadcast:cancel", { id: "6" });
+
+    const result = await done;
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/cancel/i);
+    expect(result.error).not.toMatch(/failed after/);
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("rejects invalid tx hex without dialing", async () => {
+    const db = createSqliteDatabase(":memory:");
+    upsertAlive(db, "1.1.1.1");
+    const bus = createMessageBus();
+    let dialed = 0;
+
+    const mod = createBroadcastModule(
+      { bus, db },
+      {
+        connect: async () => {
+          dialed++;
+          throw new Error("should not dial");
+        },
+      },
+    );
+    await mod.start();
+
+    const done = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      bus.on("broadcast:done", (p) => resolve(p));
+    });
+    bus.emit("broadcast:request", { id: "7", txHex: "not-hex" });
+
+    const result = await done;
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/invalid transaction hex/i);
+    expect(dialed).toBe(0);
+
+    await mod.stop();
+    db.close();
+  });
 });

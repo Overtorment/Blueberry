@@ -34,7 +34,7 @@ export function torStreamToByteDuplex(stream: {
       buffer = new Uint8Array(0);
       return out;
     }
-    const out = buffer.subarray(0, n);
+    const out = buffer.slice(0, n);
     buffer = buffer.subarray(n);
     return out;
   };
@@ -42,18 +42,29 @@ export function torStreamToByteDuplex(stream: {
   return {
     async read(n) {
       if (closed) return new Uint8Array(0);
-      const buffered = take(n);
-      if (buffered) return buffered;
-      const { value, done } = await reader.read();
-      if (done || !value) {
-        closed = true;
-        return new Uint8Array(0);
+      for (;;) {
+        const buffered = take(n);
+        if (buffered) return buffered;
+        let value: Uint8Array | undefined;
+        let done = false;
+        try {
+          const result = await reader.read();
+          value = result.value;
+          done = result.done;
+        } catch {
+          closed = true;
+          return new Uint8Array(0);
+        }
+        if (done) {
+          closed = true;
+          return new Uint8Array(0);
+        }
+        if (!value || value.length === 0) continue;
+        const next = new Uint8Array(buffer.length + value.length);
+        next.set(buffer);
+        next.set(value, buffer.length);
+        buffer = next;
       }
-      const next = new Uint8Array(buffer.length + value.length);
-      next.set(buffer);
-      next.set(value, buffer.length);
-      buffer = next;
-      return take(n) ?? new Uint8Array(0);
     },
     async write(bytes) {
       await writer.write(bytes.slice());
@@ -66,7 +77,7 @@ export function torStreamToByteDuplex(stream: {
         // ignore
       }
       try {
-        reader.releaseLock();
+        await reader.cancel();
       } catch {
         // ignore
       }

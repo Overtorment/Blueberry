@@ -7,7 +7,7 @@ import { APP_NAME, APP_VERSION } from "../../net/user-agent.ts";
 import type { Module, ModuleContext } from "../types.ts";
 import { withTorDialRetries } from "./tor-dial-policy.ts";
 import { createTorByteDuplexDialer } from "./tor-byte-duplex.ts";
-import { broadcastTxV2 } from "./v2-broadcast.ts";
+import { broadcastTxV2, decodeBroadcastTx } from "./v2-broadcast.ts";
 
 /** Bitcoin NODE_NETWORK — can serve the chain (and accept txs). */
 const NODE_NETWORK = 1n;
@@ -37,14 +37,16 @@ export type BroadcastModuleOptions = {
   random?: () => number;
 };
 
+function abortedError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("cancelled");
+}
+
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
-      reject(
-        signal.reason instanceof Error
-          ? signal.reason
-          : new Error("cancelled"),
-      );
+      reject(abortedError(signal));
       return;
     }
     const timer = setTimeout(() => {
@@ -54,11 +56,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
     timer.unref?.();
     const onAbort = () => {
       clearTimeout(timer);
-      reject(
-        signal.reason instanceof Error
-          ? signal.reason
-          : new Error("cancelled"),
-      );
+      reject(abortedError(signal));
     };
     signal.addEventListener("abort", onAbort, { once: true });
   });
@@ -151,18 +149,19 @@ export function createBroadcastModule(
   ): Promise<{ ok: true; peer: string } | { ok: false; failures: string[] }> {
     const failures: string[] = [];
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (signal.aborted) throw new Error("cancelled");
+      if (signal.aborted) throw abortedError(signal);
       const peer = pickAlive(alivePeers(ALIVE_PEER_PICK_LIMIT), random);
       if (!peer) break;
       const key = peerKey(peer);
       log("broadcast", `attempt ${attempt}/${maxAttempts} → ${key}`);
-      emitProgress("attempt", { attempt, peer: key });
+      emitProgress("attempt", { peer: key });
 
       try {
         await attemptOne(dial, peer, txHex, signal);
         log("broadcast", `success via ${key}`);
         return { ok: true, peer: key };
       } catch (err) {
+        if (signal.aborted) throw abortedError(signal);
         const detail = formatError(err);
         failures.push(`${key}: ${detail}`);
         logError(
@@ -171,7 +170,6 @@ export function createBroadcastModule(
           err,
         );
         emitProgress("failed-attempt", {
-          attempt,
           peer: key,
           detail,
         });
@@ -185,21 +183,32 @@ export function createBroadcastModule(
     activeId = id;
     activeAbort = abort;
 
+    const attemptBudget = injectedConnect
+      ? maxAttempts
+      : maxAttempts * dialerAttempts;
+    let attemptsUsed = 0;
+
     const emitProgress = (
       phase: EventMap["broadcast:progress"]["phase"],
       extra: Partial<
         Omit<EventMap["broadcast:progress"], "id" | "phase" | "maxAttempts">
       > = {},
     ) => {
-      ctx.bus.emit("broadcast:progress", {
+      if (phase === "attempt") attemptsUsed += 1;
+      const payload: EventMap["broadcast:progress"] = {
         id,
         phase,
-        maxAttempts,
+        maxAttempts: attemptBudget,
         ...extra,
-      });
+      };
+      if (phase === "attempt" || phase === "failed-attempt") {
+        payload.attempt = attemptsUsed;
+      }
+      ctx.bus.emit("broadcast:progress", payload);
     };
 
     try {
+      decodeBroadcastTx(txHex);
       log(
         "broadcast",
         `start id=${id} txHexLen=${txHex.length} maxAttempts=${maxAttempts} dialerAttempts=${dialerAttempts}`,
@@ -209,7 +218,6 @@ export function createBroadcastModule(
 
       let successPeer: string | null = null;
       let failures: string[] = [];
-      let usedTorDialer = false;
 
       if (injectedConnect) {
         const outcome = await runPeerAttempts(
@@ -221,7 +229,6 @@ export function createBroadcastModule(
         if (outcome.ok) successPeer = outcome.peer;
         else failures = outcome.failures;
       } else {
-        usedTorDialer = true;
         try {
           successPeer = await withTorDialRetries(
             () => createTorByteDuplexDialer(),
@@ -253,10 +260,10 @@ export function createBroadcastModule(
           failures.length > 0
             ? failures.slice(-3).join(" | ")
             : "no alive peers";
-        const attemptCount = usedTorDialer
-          ? maxAttempts * dialerAttempts
-          : failures.length || maxAttempts;
-        const error = `broadcast failed after ${attemptCount} attempts: ${summary}`;
+        const error =
+          attemptsUsed > 0
+            ? `broadcast failed after ${attemptsUsed} attempts: ${summary}`
+            : `broadcast failed: ${summary}`;
         log("broadcast", error);
         const logHint = getLogPath() ? ` (see ${getLogPath()})` : "";
         ctx.bus.emit("broadcast:done", {
