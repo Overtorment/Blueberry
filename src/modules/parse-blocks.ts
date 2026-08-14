@@ -20,6 +20,7 @@ const DEFAULT_BLOCK_GAP_MS = 1000;
 export type ParseBlocksOptions = {
   wallet: Wallet;
   batchSize?: number;
+  /** Backoff after an unexpected batch error (default 1000ms). Idle waits are kick-driven. */
   idleDelayMs?: number;
   /** Sleep between parsed blocks (default 1000ms). Use 0 in tests. */
   blockGapMs?: number;
@@ -59,27 +60,31 @@ export function createParseBlocksModule(
   let unsubIdle: (() => void) | undefined;
   let unsubCatchup: (() => void) | undefined;
   let loopPromise: Promise<void> | undefined;
+  const failedHeights = new Set<number>();
 
   function kick() {
     wake?.();
   }
 
-  function waitForKick(ms = idleDelayMs): Promise<void> {
+  function waitForKick(ms?: number): Promise<void> {
     return new Promise((resolve) => {
       if (stopped) {
         resolve();
         return;
       }
       let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const done = () => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer !== undefined) clearTimeout(timer);
         if (wake === done) wake = undefined;
         resolve();
       };
-      const timer = setTimeout(done, ms);
-      timer.unref?.();
+      if (ms !== undefined) {
+        timer = setTimeout(done, ms);
+        timer.unref?.();
+      }
       wake = done;
     });
   }
@@ -98,13 +103,13 @@ export function createParseBlocksModule(
     ctx.bus.emit("wallet:txs", { at: now() });
   }
 
-  function maybeGrowWatch(): void {
+  function maybeGrowWatch(): boolean {
     const snap = wallet.snapshot();
     // Fixed watch sets (WIF four scripts / single address) never grow HD gaps.
-    if (snap.kind === "wif" || snap.kind === "address") return;
+    if (snap.kind === "wif" || snap.kind === "address") return false;
     const used = usedWatchIndexes(ctx.db.transactions.list(), snap);
     const result = growWatchGapsIfNeeded(loadWatchGaps(ctx.db), used);
-    if (!result.grew) return;
+    if (!result.grew) return false;
     saveWatchGaps(ctx.db, result.gaps);
     wallet.refresh();
     // Rematch filters; clear parsed so prior FP downloads get re-parsed
@@ -135,18 +140,36 @@ export function createParseBlocksModule(
       total,
     });
     needsRun = true;
+    return true;
   }
 
   async function parseBatch(): Promise<void> {
     await onParseBatch?.();
 
-    const blocks = ctx.db.blocks.listNeedingParse(batchSize);
+    const listed = ctx.db.blocks.listNeedingParse(
+      batchSize + failedHeights.size + 1,
+    );
+    const blocks = [];
+    for (const block of listed) {
+      if (failedHeights.has(block.height)) continue;
+      if (blocks.length >= batchSize) {
+        needsRun = true;
+        break;
+      }
+      blocks.push(block);
+    }
+    if (blocks.length === 0) {
+      maybeGrowWatch();
+      refreshNetDeltasAndEmit();
+      return;
+    }
+
     const scripts = wallet.scripts();
     const utxos = buildUtxoMap(ctx.db.transactions.list(), scripts);
+    let sawWatchTx = false;
     for (let i = 0; i < blocks.length; i++) {
       if (stopped || !allowed) return;
       const block = blocks[i]!;
-      if (ctx.db.parsedBlocks.has(block.height)) continue;
       await yieldOnce();
       if (stopped || !allowed) return;
       try {
@@ -163,10 +186,16 @@ export function createParseBlocksModule(
           });
         }
         ctx.db.parsedBlocks.mark(block.height);
-        if (watchTxs.length > 0) refreshNetDeltasAndEmit();
-        else ctx.bus.emit("wallet:txs", { at: now() });
-        maybeGrowWatch();
+        if (watchTxs.length > 0) {
+          sawWatchTx = true;
+          refreshNetDeltasAndEmit();
+          // Stale scripts/UTXOs must not mark later heights in this snapshot.
+          if (maybeGrowWatch()) return;
+        } else {
+          ctx.bus.emit("wallet:txs", { at: now() });
+        }
       } catch (err) {
+        failedHeights.add(block.height);
         ctx.bus.emit("module:status", {
           module: "parse-blocks",
           status: "error",
@@ -184,9 +213,8 @@ export function createParseBlocksModule(
       }
     }
 
-    refreshNetDeltasAndEmit();
-    // Empty backlog / startup with existing txs: still run the gap check.
-    if (blocks.length === 0) maybeGrowWatch();
+    // False-positive batches still check existing txs for danger-zone growth.
+    if (!sawWatchTx) maybeGrowWatch();
   }
 
   async function loop(): Promise<void> {
@@ -195,6 +223,7 @@ export function createParseBlocksModule(
       needsRun = false;
       if (!allowed) {
         busy = false;
+        failedHeights.clear();
         await waitForKick();
         continue;
       }
@@ -207,7 +236,9 @@ export function createParseBlocksModule(
           detail: err instanceof Error ? err.message : String(err),
         });
         busy = false;
-        return;
+        if (stopped) return;
+        await waitForKick(idleDelayMs);
+        continue;
       }
       busy = false;
       if (stopped) return;
@@ -215,6 +246,7 @@ export function createParseBlocksModule(
         await yieldOnce();
         continue;
       }
+      failedHeights.clear();
       await waitForKick();
     }
   }
@@ -224,6 +256,7 @@ export function createParseBlocksModule(
     async start() {
       if (!stopped) return;
       stopped = false;
+      failedHeights.clear();
       ctx.bus.emit("module:status", {
         module: "parse-blocks",
         status: "starting",
