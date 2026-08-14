@@ -165,4 +165,36 @@ describe("scanFiltersForMatches", () => {
   test("default chunk is smaller than the DB batch so matching can yield", () => {
     expect(MATCH_CHUNK_SIZE).toBeLessThan(MATCH_FILTER_BATCH_SIZE);
   });
+
+  test("drops a stale in-memory chunk after rewind so the new hash can match", async () => {
+    const db = createSqliteDatabase(":memory:");
+    const wallet = deriveWatchWallet(MNEMONIC, 4);
+    const oldHash = "11".repeat(32);
+    const newHash = "aa".repeat(32);
+    append(db, 100, oldHash, [wallet.scripts[0]!]);
+    append(db, 101, oldHash, [wallet.scripts[0]!]);
+
+    let rewound = false;
+    await scanFiltersForMatches(
+      db,
+      wallet.scripts,
+      {},
+      {
+        yieldFn: async () => {
+          if (!rewound && db.filters.countScanned() >= 1) {
+            rewound = true;
+            db.rewindAfter(100);
+            append(db, 101, newHash, [wallet.scripts[0]!]);
+          }
+        },
+        batchGapMs: 0,
+        chunkSize: 1,
+      },
+    );
+
+    expect(db.matchedBlocks.get(100)?.blockHashInternalHex).toBe(oldHash);
+    expect(db.matchedBlocks.get(101)?.blockHashInternalHex).toBe(newHash);
+    expect(db.filters.listNeedingMatch(10)).toEqual([]);
+    db.close();
+  });
 });

@@ -217,6 +217,36 @@ describe("SqliteDatabase filters", () => {
     db.close();
   });
 
+  test("completeInRange is true for a filled span even with a hole below it", () => {
+    const db = createSqliteDatabase(":memory:");
+    db.filters.append([
+      {
+        height: 50,
+        blockHashInternalHex: "aa".repeat(32),
+        filter: new Uint8Array([0x01]),
+      },
+      {
+        height: 100,
+        blockHashInternalHex: "bb".repeat(32),
+        filter: new Uint8Array([0x02]),
+      },
+      {
+        height: 101,
+        blockHashInternalHex: "cc".repeat(32),
+        filter: new Uint8Array([0x03]),
+      },
+      {
+        height: 102,
+        blockHashInternalHex: "dd".repeat(32),
+        filter: new Uint8Array([0x04]),
+      },
+    ]);
+    expect(db.filters.completeInRange(100, 102)).toBe(true);
+    expect(db.filters.missingRanges(100, 102, 10_000)).toEqual([]);
+    expect(db.filters.completeInRange(50, 102)).toBe(false);
+    db.close();
+  });
+
   test("firstHashMismatch finds disagreeing filter", () => {
     const db = createSqliteDatabase(":memory:");
     const seed = checkpointSeedRecord();
@@ -232,6 +262,20 @@ describe("SqliteDatabase filters", () => {
       },
     ]);
     expect(db.filters.firstHashMismatch(from, from)).toBe(from);
+    db.close();
+  });
+
+  test("hashAt returns the stored block hash or null", () => {
+    const db = createSqliteDatabase(":memory:");
+    expect(db.filters.hashAt(100)).toBeNull();
+    db.filters.append([
+      {
+        height: 100,
+        blockHashInternalHex: "ab".repeat(32),
+        filter: new Uint8Array(45 * 1024).fill(0x01),
+      },
+    ]);
+    expect(db.filters.hashAt(100)).toBe("ab".repeat(32));
     db.close();
   });
 

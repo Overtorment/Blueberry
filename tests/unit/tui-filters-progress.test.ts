@@ -69,4 +69,65 @@ describe("TUI filters progress wiring", () => {
     tui.stop();
     db.close();
   });
+
+  test("blocks:progress after rewind hydrates filter counts from DB", () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.filters.append([
+      {
+        height: 1,
+        blockHashInternalHex: "11".repeat(32),
+        filter: hexToBytes("aa"),
+      },
+      {
+        height: 2,
+        blockHashInternalHex: "22".repeat(32),
+        filter: hexToBytes("bb"),
+      },
+      {
+        height: 3,
+        blockHashInternalHex: "33".repeat(32),
+        filter: hexToBytes("cc"),
+      },
+    ]);
+    const filtersProgressStore = createFiltersProgressStore();
+    const matchingProgressStore = createMatchingProgressStore();
+    const tui = createTuiModule(
+      { bus, db },
+      createModuleStatusStore(),
+      createPeerSocketsStore(),
+      createHeadersProgressStore(),
+      filtersProgressStore,
+      matchingProgressStore,
+      createBlocksMatchedStore(),
+      createWalletTxsStore(),
+    );
+    tui.start();
+    expect(filtersProgressStore.get()).toMatchObject({
+      downloaded: 3,
+      total: 3,
+      percent: 100,
+    });
+    expect(matchingProgressStore.get()).toMatchObject({
+      scanned: 0,
+      total: 3,
+    });
+
+    db.rewindAfter(1);
+    bus.emit("blocks:progress", {
+      at: 50,
+      downloaded: 0,
+      matched: 0,
+    });
+
+    expect(filtersProgressStore.get().downloaded).toBe(1);
+    expect(filtersProgressStore.get().percent).toBeLessThan(100);
+    expect(matchingProgressStore.get()).toMatchObject({
+      scanned: 0,
+      total: 1,
+      at: 50,
+    });
+    tui.stop();
+    db.close();
+  });
 });

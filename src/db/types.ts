@@ -98,6 +98,8 @@ export interface FiltersRepository {
   maxHeight(): number | null;
   has(height: number): boolean;
   get(height: number): FilterRecord | null;
+  /** Block hash only — does not load the ~45KB filter blob. */
+  hashAt(height: number): string | null;
   /** Lowest height in [from, to] whose filter hash disagrees with the header. */
   firstHashMismatch(from: number, to: number): number | null;
   missingRanges(
@@ -107,7 +109,8 @@ export interface FiltersRepository {
   ): Array<{ from: number; to: number }>;
   /**
    * True when every height in [from, to] has a filter.
-   * Uses min/max/count only (no fat-table scan) — safe for hot paths.
+   * Solid global min/max/count is the hot path; otherwise a PK-range COUNT
+   * (no filter blobs). Prefix holes below `from` must not make this false.
    */
   completeInRange(from: number, to: number): boolean;
   append(rows: FilterRecord[]): void;

@@ -5,6 +5,7 @@ import { Transaction as BjsTx } from "bitcoinjs-lib";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 import {
   buildActiveSendTx,
+  pickUtxosByKeys,
   setActiveSendContext,
 } from "../../src/tui/send-context.ts";
 import { deriveWatchWallet } from "../../src/wallet/derive.ts";
@@ -98,5 +99,33 @@ describe("buildActiveSendTx address change", () => {
     const outputs = [tx.getOutputAddress(0), tx.getOutputAddress(1)];
     expect(outputs).toContain(ADDR_BECH32);
     db.close();
+  });
+});
+
+describe("pickUtxosByKeys", () => {
+  const utxos = [
+    { key: "a", valueSats: 1n },
+    { key: "b", valueSats: 2n },
+  ];
+
+  test("returns selected UTXOs when every key is still present", () => {
+    expect(pickUtxosByKeys(utxos, ["b", "a"])).toEqual({
+      ok: true,
+      selected: [utxos[0], utxos[1]],
+    });
+  });
+
+  test("errors when a selected key disappeared", () => {
+    expect(pickUtxosByKeys(utxos, ["a", "gone"])).toEqual({
+      ok: false,
+      error: "some selected UTXOs are no longer available",
+    });
+  });
+
+  test("errors when nothing is selected", () => {
+    expect(pickUtxosByKeys(utxos, [])).toEqual({
+      ok: false,
+      error: "no UTXOs selected",
+    });
   });
 });

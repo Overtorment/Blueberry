@@ -206,7 +206,7 @@ type LiveSession = {
 
 export type HeaderSessionPool = {
   has(host: string, port: number): boolean;
-  /** True when a live session exists and is mid-getheaders. */
+  /** True when connecting/handshaking or a live session is mid-getheaders. */
   isBusy(host: string, port: number): boolean;
   fetchBatch(
     host: string,
@@ -234,6 +234,8 @@ export function createHeaderSessionPool(
   const onOpenCount = poolOptions.onOpenCount;
   const connect = poolOptions.connect;
   const sessions = new Map<string, LiveSession>();
+  /** Keys with connect/handshake in flight — not yet in `sessions`. */
+  const connecting = new Set<string>();
   let opening = 0;
   let lastOpenCount = -1;
   let epoch = 0;
@@ -292,15 +294,17 @@ export function createHeaderSessionPool(
       connectTimeoutMs,
       "header connect/handshake",
     );
+    let duplex: HeaderSyncDuplex | undefined;
     try {
-      const duplex = await connectOrAbort(
+      duplex = await connectOrAbort(
         connect,
         host,
         port,
         controller.signal,
       );
+      const liveDuplex = duplex;
       const { protocol, startHeight } = await raceAbort(
-        handshake(duplex, port),
+        handshake(liveDuplex, port),
         controller,
       );
       return {
@@ -314,10 +318,19 @@ export function createHeaderSessionPool(
           try {
             await protocol.close();
           } catch {
-            await duplex.close();
+            await liveDuplex.close();
           }
         },
       };
+    } catch (err) {
+      if (duplex) {
+        try {
+          await duplex.close();
+        } catch {
+          // ignore
+        }
+      }
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -325,11 +338,13 @@ export function createHeaderSessionPool(
 
   return {
     has(host, port) {
-      return sessions.has(peerKey(host, port));
+      const key = peerKey(host, port);
+      return sessions.has(key) || connecting.has(key);
     },
 
     isBusy(host, port) {
-      return sessions.get(peerKey(host, port))?.busy === true;
+      const key = peerKey(host, port);
+      return sessions.get(key)?.busy === true || connecting.has(key);
     },
 
     async fetchBatch(host, port, options) {
@@ -344,6 +359,10 @@ export function createHeaderSessionPool(
       const started = epoch;
       try {
         if (!session) {
+          if (connecting.has(key)) {
+            return { ok: false, error: SESSION_BUSY_ERROR };
+          }
+          connecting.add(key);
           opening++;
           notifyOpenCount();
           try {
@@ -354,6 +373,7 @@ export function createHeaderSessionPool(
               return { ok: false, error: "session closed" };
             }
           } finally {
+            connecting.delete(key);
             opening--;
             notifyOpenCount();
           }

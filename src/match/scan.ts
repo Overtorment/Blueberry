@@ -1,5 +1,5 @@
 import { matchAnyBasicFilters } from "bip158";
-import type { Database } from "../db/types.ts";
+import type { Database, FilterRecord } from "../db/types.ts";
 
 /** Rows loaded from SQLite per outer iteration. */
 export const MATCH_FILTER_BATCH_SIZE = 1000;
@@ -48,6 +48,20 @@ function toDisplayHash(internalHex: string): Uint8Array {
   return out;
 }
 
+function rowStillCurrent(db: Database, row: FilterRecord): boolean {
+  if (db.filters.hashAt(row.height) !== row.blockHashInternalHex) {
+    return false;
+  }
+  const header = db.headers.get(row.height);
+  if (
+    header !== null &&
+    header.hashInternalHex !== row.blockHashInternalHex
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /** Scan unscanned filters until empty or shouldContinue is false. */
 export async function scanFiltersForMatches(
   db: Database,
@@ -92,8 +106,16 @@ export async function scanFiltersForMatches(
       }
 
       const chunk = batch.slice(offset, offset + chunkSize);
-      const filterBytesList = chunk.map((row) => row.filter);
-      const hashList = chunk.map((row) =>
+      const current = chunk.filter((row) => rowStillCurrent(db, row));
+      if (current.length === 0) {
+        scanned = db.filters.countScanned();
+        emitProgress();
+        await pause();
+        continue;
+      }
+
+      const filterBytesList = current.map((row) => row.filter);
+      const hashList = current.map((row) =>
         toDisplayHash(row.blockHashInternalHex),
       );
 
@@ -104,8 +126,8 @@ export async function scanFiltersForMatches(
       );
 
       const heights: number[] = [];
-      for (let i = 0; i < chunk.length; i++) {
-        const row = chunk[i]!;
+      for (let i = 0; i < current.length; i++) {
+        const row = current[i]!;
         heights.push(row.height);
         if (hitFlags[i]) {
           const inserted = db.matchedBlocks.insert({
