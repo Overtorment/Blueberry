@@ -7,6 +7,7 @@ export type BroadcastUiPhase =
 
 export type BroadcastUiSnapshot = {
   id: string | null;
+  txHex: string | null;
   phase: BroadcastUiPhase;
   attempt: number | null;
   maxAttempts: number | null;
@@ -17,6 +18,7 @@ export type BroadcastUiSnapshot = {
 
 export const idleBroadcastSnapshot: BroadcastUiSnapshot = {
   id: null,
+  txHex: null,
   phase: "idle",
   attempt: null,
   maxAttempts: null,
@@ -30,7 +32,7 @@ export type BroadcastStore = {
   subscribe(listener: () => void): () => void;
   reset(): void;
   /** Mark in-flight immediately so Esc can cancel before the first progress event. */
-  begin(id: string): void;
+  begin(id: string, txHex: string): void;
   applyProgress(payload: {
     id: string;
     phase: string;
@@ -64,16 +66,17 @@ export function createBroadcastStore(): BroadcastStore {
       snap = { ...idleBroadcastSnapshot };
       emit();
     },
-    begin(id) {
+    begin(id, txHex) {
       snap = {
         ...idleBroadcastSnapshot,
         id,
+        txHex,
         phase: "waiting-peers",
       };
       emit();
     },
     applyProgress(payload) {
-      if (snap.id && snap.id !== payload.id) return;
+      if (snap.id !== payload.id) return;
       const phase =
         payload.phase === "waiting-peers" ||
         payload.phase === "attempt" ||
@@ -84,6 +87,7 @@ export function createBroadcastStore(): BroadcastStore {
             : snap.phase;
       snap = {
         id: payload.id,
+        txHex: snap.txHex,
         phase,
         attempt: payload.attempt ?? snap.attempt,
         maxAttempts: payload.maxAttempts ?? snap.maxAttempts,
@@ -94,10 +98,11 @@ export function createBroadcastStore(): BroadcastStore {
       emit();
     },
     applyDone(payload) {
-      if (snap.id && snap.id !== payload.id) return;
+      if (snap.id !== payload.id) return;
       if (payload.ok) {
         snap = {
           id: payload.id,
+          txHex: snap.txHex,
           phase: "success",
           attempt: snap.attempt,
           maxAttempts: snap.maxAttempts,
@@ -108,6 +113,7 @@ export function createBroadcastStore(): BroadcastStore {
       } else {
         snap = {
           id: payload.id,
+          txHex: snap.txHex,
           phase: "error",
           attempt: snap.attempt,
           maxAttempts: snap.maxAttempts,

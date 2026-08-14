@@ -75,6 +75,9 @@ export function createTuiModule(
         ctx.bus.on("blocks:progress", (p) => {
           hydrateBlocks(ctx.db, blocksMatchedStore, p.at);
           hydrateWalletBlockCounts(ctx.db, walletTxsStore);
+          // Reorg persist emits blocks:progress (not filters:progress).
+          hydrateFilters(ctx.db, filtersProgressStore, undefined, p.at);
+          hydrateMatching(ctx.db, matchingProgressStore, p.at);
         }),
       );
       unsubs.push(

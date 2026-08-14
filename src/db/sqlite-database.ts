@@ -518,6 +518,9 @@ export function createSqliteDatabase(path: string): Database {
   const countUnscannedStmt = raw.query(
     `SELECT COUNT(*) AS n FROM filters_unscanned`,
   );
+  const filterHashAtStmt = raw.query(
+    `SELECT block_hash_internal_hex AS h FROM filters WHERE height = ?`,
+  );
 
   function cachedFilterCount(): number {
     if (filterCountCache === null) {
@@ -585,6 +588,11 @@ export function createSqliteDatabase(path: string): Database {
         )
         .get(height) as FilterRow | null;
       return row ? rowToFilter(row) : null;
+    },
+
+    hashAt(height) {
+      const row = filterHashAtStmt.get(height) as { h: string } | null;
+      return row?.h ?? null;
     },
 
     firstHashMismatch(from, to) {
@@ -664,8 +672,10 @@ export function createSqliteDatabase(path: string): Database {
       if (minH === null || maxH === null) return false;
       if (minH > from || maxH < to) return false;
       const count = cachedFilterCount();
-      // Contiguous solid covering [minH, maxH] implies [from, to] is filled.
-      return maxH - minH + 1 === count;
+      // Contiguous [minH, maxH] implies [from, to] is filled.
+      if (maxH - minH + 1 === count) return true;
+      // Prefix/other holes outside the span: PK count, not the filter blobs.
+      return this.countInRange(from, to) === to - from + 1;
     },
 
     append(rows) {

@@ -5,7 +5,11 @@ export type SyncSnapshot = {
   /** From last headers:progress (0/0 = unknown tip). */
   headersDownloaded: number;
   headersTotal: number;
-  /** missingRanges(...).length for [headersMin, headersTip]. */
+  /**
+   * 0 if filters cover birthday→header tip, else 1.
+   * Not `missingRanges(headersMin, headersTip).length` (that includes
+   * pre-birthday heights this node never downloads).
+   */
   filterMissingRangeCount: number;
   /** Filter work pending and CF peer pool below threshold. */
   filterWorkNeedsPeers: boolean;

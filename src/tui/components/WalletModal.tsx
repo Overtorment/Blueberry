@@ -4,11 +4,15 @@ import { isSendMaxAmount, parseBtcToSats } from "../../parse/format.ts";
 import type { BuildSendResult } from "../../wallet/build-send-tx.ts";
 import { isAddressValid } from "../../wallet/is-address-valid.ts";
 import {
+  broadcastJobInFlight,
   cancelBroadcast,
+  inFlightBroadcastEscape,
+  previewOwnsBroadcastJob,
+  previewShowsBroadcastUi,
   startUiBroadcast,
 } from "../broadcast-actions.ts";
 import { fitCryptoPsbtUrQr } from "../fit-ur-qr.ts";
-import { buildActiveSendTx } from "../send-context.ts";
+import { buildActiveSendTx, pickUtxosByKeys } from "../send-context.ts";
 import { THEME } from "../theme.ts";
 import { qrAsciiLinesFitting, qrAsciiLinesCompact } from "../qr-ascii.ts";
 import { useBroadcast, useBroadcastStore } from "../use-broadcast.ts";
@@ -68,10 +72,23 @@ function isFeerateValid(input: string): boolean {
   return Number.isFinite(n) && n > 0;
 }
 
-function FeeHelpLine(props: { preview: BuildSendResult; label: string }) {
+function FeeHelpLine(props: {
+  preview: BuildSendResult;
+  label: string;
+  toAddress: string;
+  amountSats: bigint | "max";
+  inputSum: bigint;
+}) {
+  const paid =
+    props.amountSats === "max"
+      ? props.inputSum - props.preview.feeSats - props.preview.changeSats
+      : props.amountSats;
   return (
     <text fg={THEME.fgDim}>
-      {`${props.label} · fee `}
+      {`${props.label} · ${props.toAddress} · `}
+      <BtcAmount sats={paid} />
+      {props.amountSats === "max" ? " max" : null}
+      {` · fee `}
       <BtcAmount sats={props.preview.feeSats} />
       {` (${props.preview.vsize} vB)`}
       {props.preview.changeSats > 0n ? (
@@ -230,11 +247,17 @@ function BroadcastProgressBody() {
 function SignedTxPreviewBody(props: {
   txHex: string;
   preview: BuildSendResult;
+  toAddress: string;
+  amountSats: bigint | "max";
+  inputSum: bigint;
 }) {
   const broadcast = useBroadcast();
   const broadcastStore = useBroadcastStore();
-  const busy =
-    broadcast.phase === "waiting-peers" || broadcast.phase === "attempt";
+  const showBroadcast = previewShowsBroadcastUi(
+    broadcast.phase,
+    broadcast.txHex,
+    props.txHex,
+  );
 
   useKeyboard((key) => {
     if (key.name !== "return" && key.name !== "enter") return;
@@ -243,7 +266,7 @@ function SignedTxPreviewBody(props: {
     startUiBroadcast(broadcastStore, props.txHex);
   });
 
-  if (busy || broadcast.phase === "success" || broadcast.phase === "error") {
+  if (showBroadcast) {
     return <BroadcastProgressBody />;
   }
 
@@ -255,7 +278,13 @@ function SignedTxPreviewBody(props: {
       gap={1}
       overflow="hidden"
     >
-      <FeeHelpLine preview={props.preview} label="Signed tx" />
+      <FeeHelpLine
+        preview={props.preview}
+        label="Signed tx"
+        toAddress={props.toAddress}
+        amountSats={props.amountSats}
+        inputSum={props.inputSum}
+      />
       <text fg={THEME.fgDim}>Transaction hex (broadcast-ready)</text>
       <scrollbox
         flexGrow={1}
@@ -282,7 +311,11 @@ function SignedTxPreviewBody(props: {
   );
 }
 
-function SendPreviewBody(props: { preview: BuildSendResult }) {
+function SendPreviewBody(props: {
+  preview: BuildSendResult;
+  details: SendDetails;
+  inputSum: bigint;
+}) {
   if (props.preview.kind === "psbt") {
     return (
       <box
@@ -295,6 +328,9 @@ function SendPreviewBody(props: { preview: BuildSendResult }) {
         <FeeHelpLine
           preview={props.preview}
           label="Unsigned PSBT · scan to sign"
+          toAddress={props.details.toAddress}
+          amountSats={props.details.amountSats}
+          inputSum={props.inputSum}
         />
         <AnimatedUrQr psbtHex={props.preview.psbtHex} />
       </box>
@@ -305,6 +341,9 @@ function SendPreviewBody(props: { preview: BuildSendResult }) {
     <SignedTxPreviewBody
       txHex={props.preview.txHex}
       preview={props.preview}
+      toAddress={props.details.toAddress}
+      amountSats={props.details.amountSats}
+      inputSum={props.inputSum}
     />
   );
 }
@@ -451,6 +490,8 @@ function SendDetailsForm(props: {
 function SendBody(props: {
   step: SendStep;
   selectedKeys: string[];
+  details: SendDetails | null;
+  previewInputSum: bigint;
   onUtxosContinue: (keys: string[]) => void;
   onDetailsContinue: (details: SendDetails) => void;
   onFeerateContinue: (feeRateSatPerVb: number) => string | null;
@@ -569,8 +610,14 @@ function SendBody(props: {
   for (const u of utxos) {
     if (selectedKeySet.has(u.key)) selectedSum += u.valueSats;
   }
-  if (props.step === "preview" && props.preview) {
-    return <SendPreviewBody preview={props.preview} />;
+  if (props.step === "preview" && props.preview && props.details) {
+    return (
+      <SendPreviewBody
+        preview={props.preview}
+        details={props.details}
+        inputSum={props.previewInputSum}
+      />
+    );
   }
 
   if (props.step === "feerate") {
@@ -651,7 +698,11 @@ export function WalletModal({ kind }: WalletModalProps) {
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [details, setDetails] = useState<SendDetails | null>(null);
   const [preview, setPreview] = useState<BuildSendResult | null>(null);
+  const [previewInputSum, setPreviewInputSum] = useState(0n);
   const [utxoRenaming, setUtxoRenaming] = useState(false);
+  const [cancelArmedForId, setCancelArmedForId] = useState<string | null>(
+    null,
+  );
   const accent =
     kind === "receive" ? THEME.accentMagenta : THEME.accentCyan;
   const titleLabel = kind === "receive" ? "Receive" : "Send";
@@ -662,8 +713,12 @@ export function WalletModal({ kind }: WalletModalProps) {
       setSelectedKeys([]);
       setDetails(null);
       setPreview(null);
+      setPreviewInputSum(0n);
       setUtxoRenaming(false);
-      broadcastStore?.reset();
+      setCancelArmedForId(null);
+      if (!broadcastJobInFlight(broadcastStore?.get().phase)) {
+        broadcastStore?.reset();
+      }
     }
   }, [kind, broadcastStore]);
 
@@ -671,13 +726,25 @@ export function WalletModal({ kind }: WalletModalProps) {
     if (key.name !== "escape" && key.name !== "esc") return;
     if (utxoRenaming) return;
     const snap = broadcastStore?.get();
-    const canceling =
+    const action = inFlightBroadcastEscape(
+      snap?.phase,
+      snap?.id,
+      cancelArmedForId,
+    );
+    if (
       kind === "send" &&
       sendStep === "preview" &&
       preview?.kind === "signed" &&
-      (snap?.phase === "waiting-peers" || snap?.phase === "attempt");
-    if (canceling && snap?.id) {
+      snap?.id &&
+      previewOwnsBroadcastJob(snap.txHex, preview.txHex) &&
+      action !== "ignore"
+    ) {
       cancelBroadcast(snap.id);
+      if (action === "force-close") {
+        uiRouteStore?.close();
+        return;
+      }
+      setCancelArmedForId(snap.id);
       return;
     }
     if (snap?.phase === "success" || snap?.phase === "error") {
@@ -750,7 +817,9 @@ export function WalletModal({ kind }: WalletModalProps) {
           <SendBody
             step={sendStep}
             selectedKeys={selectedKeys}
+            details={details}
             preview={preview}
+            previewInputSum={previewInputSum}
             onRenamingChange={setUtxoRenaming}
             onUtxosContinue={(keys) => {
               setSelectedKeys(keys);
@@ -764,8 +833,11 @@ export function WalletModal({ kind }: WalletModalProps) {
               if (!details || selectedKeys.length === 0) {
                 return "missing send details";
               }
-              const selected = utxos.filter((u) => selectedKeys.includes(u.key));
-              if (selected.length === 0) return "no UTXOs selected";
+              const picked = pickUtxosByKeys(utxos, selectedKeys);
+              if (!picked.ok) return picked.error;
+              const selected = picked.selected;
+              let inputSum = 0n;
+              for (const u of selected) inputSum += u.valueSats;
               try {
                 const result = buildActiveSendTx({
                   utxos: selected.map((u) => ({
@@ -779,6 +851,7 @@ export function WalletModal({ kind }: WalletModalProps) {
                   feeRateSatPerVb,
                 });
                 setPreview(result);
+                setPreviewInputSum(inputSum);
                 setSendStep("preview");
                 return null;
               } catch (err) {

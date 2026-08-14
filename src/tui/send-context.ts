@@ -83,3 +83,20 @@ export function buildActiveSendTx(params: SendBuildParams): BuildSendResult {
     changeAddress,
   });
 }
+
+export function pickUtxosByKeys<T extends { key: string }>(
+  utxos: T[],
+  keys: string[],
+): { ok: true; selected: T[] } | { ok: false; error: string } {
+  if (keys.length === 0) {
+    return { ok: false, error: "no UTXOs selected" };
+  }
+  const selected = utxos.filter((u) => keys.includes(u.key));
+  if (selected.length === 0) {
+    return { ok: false, error: "no UTXOs selected" };
+  }
+  if (selected.length !== keys.length) {
+    return { ok: false, error: "some selected UTXOs are no longer available" };
+  }
+  return { ok: true, selected };
+}
