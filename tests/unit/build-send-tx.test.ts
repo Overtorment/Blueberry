@@ -182,6 +182,59 @@ describe("buildSignedSendTx", () => {
     ).toThrow(/uneconomical/);
   });
 
+  test("non-max also rejects uneconomical selected UTXOs instead of signing a subset", () => {
+    const wallet = abandonWallet();
+    const big = utxoAt(wallet, 0);
+    const tiny = {
+      ...utxoAt(wallet, 1),
+      txid: "22".repeat(32),
+      valueSats: 30n,
+    };
+    expect(() =>
+      buildSignedSendTx({
+        secret: MNEMONIC,
+        wallet,
+        utxos: [big, tiny],
+        toAddress: BLUE_EXTERNAL_1,
+        amountSats: 50_000n,
+        feeRateSatPerVb: 1,
+        changeAddress: BLUE_INTERNAL_0,
+      }),
+    ).toThrow(/uneconomical/);
+  });
+
+  test("self-send (dest === change) keeps the payment and reports real change", () => {
+    const wallet = abandonWallet();
+    const utxo = utxoAt(wallet);
+    const feeRate = 1.5;
+
+    for (const amountSats of [10_000n, 50_000n]) {
+      const result = buildSignedSendTx({
+        secret: MNEMONIC,
+        wallet,
+        utxos: [utxo],
+        toAddress: BLUE_INTERNAL_0,
+        amountSats,
+        feeRateSatPerVb: feeRate,
+        changeAddress: BLUE_INTERNAL_0,
+      });
+
+      const tx = Transaction.fromRaw(hex.decode(result.txHex));
+      expect(tx.outputsLength).toBe(2);
+      const amounts = [
+        tx.getOutput(0).amount,
+        tx.getOutput(1).amount,
+      ];
+      expect(amounts).toContain(amountSats);
+      expect(result.changeSats).toBe(
+        utxo.valueSats - amountSats - result.feeSats,
+      );
+      expect(result.feeSats).toBe(
+        BigInt(Math.ceil(feeRate * result.vsize)),
+      );
+    }
+  });
+
   test("rejects zpub, empty utxos, bad amount/fee, and insufficient funds", () => {
     const wallet = abandonWallet();
     const utxo = utxoAt(wallet);
@@ -213,6 +266,13 @@ describe("buildSignedSendTx", () => {
         amountSats: 200_000n,
       }),
     ).toThrow(/insufficient/);
+    expect(() =>
+      buildSignedSendTx({
+        ...base,
+        secret: MNEMONIC,
+        toAddress: "not-an-address",
+      }),
+    ).toThrow(/invalid.*address/i);
   });
 });
 

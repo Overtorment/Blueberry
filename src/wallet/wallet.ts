@@ -27,7 +27,7 @@ export type Wallet = {
   gaps(): WatchGaps;
   /** Read watch gaps from DB without re-deriving. */
   peekGaps(): WatchGaps;
-  /** Re-read gaps from DB and re-derive. */
+  /** Re-read gaps from DB; re-derive only when they changed. */
   refresh(): WatchWallet;
   /**
    * Re-read gaps from DB; re-derive only when gaps changed.
@@ -51,26 +51,27 @@ export function createWallet(
   let currentGaps = loadWatchGaps(db);
   let current = deriveWatchWallet(secret, currentGaps);
 
+  const syncFromDb = () => {
+    const gaps = loadWatchGaps(db);
+    const grew =
+      gaps.external !== currentGaps.external ||
+      gaps.internal !== currentGaps.internal;
+    if (grew) {
+      currentGaps = gaps;
+      current = deriveWatchWallet(secret, currentGaps);
+    }
+    return { grew };
+  };
+
   return {
     snapshot: () => current,
     scripts: () => current.scripts,
     gaps: () => currentGaps,
     peekGaps: () => loadWatchGaps(db),
     refresh: () => {
-      currentGaps = loadWatchGaps(db);
-      current = deriveWatchWallet(secret, currentGaps);
+      syncFromDb();
       return current;
     },
-    syncFromDb: () => {
-      const gaps = loadWatchGaps(db);
-      const grew =
-        gaps.external !== currentGaps.external ||
-        gaps.internal !== currentGaps.internal;
-      if (grew) {
-        currentGaps = gaps;
-        current = deriveWatchWallet(secret, currentGaps);
-      }
-      return { grew };
-    },
+    syncFromDb,
   };
 }
