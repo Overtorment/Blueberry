@@ -187,10 +187,18 @@ export interface ParsedBlocksRepository {
   clearFrom(fromHeight: number): void;
 }
 
+export type TxSetFingerprint = {
+  count: number;
+  netDeltaSum: number;
+  newestTxid: string | null;
+};
+
 export interface TransactionsRepository {
   upsert(tx: StoredTx): void;
   list(): StoredTx[];
   count(): number;
+  /** Count + summed net delta + newest txid; does not load tx blobs. */
+  fingerprint(): TxSetFingerprint;
   /** Lowest stored wallet tx height, or null if empty. */
   minHeight(): number | null;
   setNetDelta(txid: string, netDeltaSats: number): void;

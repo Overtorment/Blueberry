@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 import { THEME } from "../theme.ts";
+import { APP_ACTION_BAR_HEIGHT } from "../tx-list-capacity.ts";
 import { useUiRouteStore } from "../use-ui-route.ts";
 
 const ACTIONS = [
@@ -72,7 +73,7 @@ export function ActionBar() {
       left={0}
       right={0}
       bottom={1}
-      height={5}
+      height={APP_ACTION_BAR_HEIGHT}
       zIndex={10}
       flexDirection="row"
       justifyContent="center"

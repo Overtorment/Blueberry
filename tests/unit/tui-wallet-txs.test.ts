@@ -121,7 +121,7 @@ describe("TUI wallet txs wiring", () => {
     expect(store.get().txs).toBe(txsBefore);
 
     bus.emit("wallet:txs", { at: 12 });
-    expect(store.get().at).toBe(12);
+    expect(store.get().txs).toBe(txsBefore);
     expect(store.get().blocksTotal).toBe(3);
     expect(store.get().blocksParsed).toBe(1);
 

@@ -15,7 +15,7 @@ export type BroadcastUiSnapshot = {
   error: string | null;
 };
 
-const idle: BroadcastUiSnapshot = {
+export const idleBroadcastSnapshot: BroadcastUiSnapshot = {
   id: null,
   phase: "idle",
   attempt: null,
@@ -47,7 +47,7 @@ export type BroadcastStore = {
 };
 
 export function createBroadcastStore(): BroadcastStore {
-  let snap: BroadcastUiSnapshot = { ...idle };
+  let snap: BroadcastUiSnapshot = { ...idleBroadcastSnapshot };
   const listeners = new Set<() => void>();
 
   function emit(): void {
@@ -61,12 +61,12 @@ export function createBroadcastStore(): BroadcastStore {
       return () => listeners.delete(listener);
     },
     reset() {
-      snap = { ...idle };
+      snap = { ...idleBroadcastSnapshot };
       emit();
     },
     begin(id) {
       snap = {
-        ...idle,
+        ...idleBroadcastSnapshot,
         id,
         phase: "waiting-peers",
       };

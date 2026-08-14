@@ -1061,6 +1061,28 @@ export function createSqliteDatabase(path: string): Database {
       return asInt(row.n);
     },
 
+    fingerprint() {
+      const row = raw
+        .query(
+          `SELECT
+             COUNT(*) AS n,
+             COALESCE(SUM(net_delta_sats), 0) AS s,
+             (SELECT txid FROM transactions
+              ORDER BY height DESC, tx_index DESC LIMIT 1) AS newest
+           FROM transactions`,
+        )
+        .get() as {
+        n: bigint | number;
+        s: bigint | number;
+        newest: string | null;
+      };
+      return {
+        count: asInt(row.n),
+        netDeltaSum: asInt(row.s),
+        newestTxid: row.newest,
+      };
+    },
+
     minHeight() {
       const row = raw
         .query("SELECT MIN(height) AS h FROM transactions")

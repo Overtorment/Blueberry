@@ -56,7 +56,7 @@ export type WalletTxsStore = {
   get(): WalletTxsSnapshot;
   apply(snapshot: WalletTxsSnapshot): void;
   /** Update parse backlog counts without rebuilding txs / UTXOs. */
-  setBlockCounts(parsed: number, total: number): void;
+  setBlockCounts(parsed: number, total: number, at?: number): void;
   setParsingActive(active: boolean): void;
   subscribe(listener: () => void): () => void;
 };
@@ -81,15 +81,24 @@ function timeLabelForHeight(
   db: Database,
   height: number,
   nowMs: number,
+  cache: Map<number, string>,
 ): string {
+  const hit = cache.get(height);
+  if (hit !== undefined) return hit;
   const stored = db.headers.get(height);
-  if (!stored) return padBlockTimeLabel(`#${height}`);
-  try {
-    const { timestamp } = decodeBlockHeader(stored.header);
-    return formatBlockTimeLabel(timestamp, nowMs);
-  } catch {
-    return padBlockTimeLabel(`#${height}`);
+  let label: string;
+  if (!stored) {
+    label = padBlockTimeLabel(`#${height}`);
+  } else {
+    try {
+      const { timestamp } = decodeBlockHeader(stored.header);
+      label = formatBlockTimeLabel(timestamp, nowMs);
+    } catch {
+      label = padBlockTimeLabel(`#${height}`);
+    }
   }
+  cache.set(height, label);
+  return label;
 }
 
 export function snapshotFromDb(
@@ -100,6 +109,7 @@ export function snapshotFromDb(
 ): WalletTxsSnapshot {
   const stored = db.transactions.list();
   const balanceSats = stored.reduce((s, t) => s + BigInt(t.netDeltaSats), 0n);
+  const timeLabels = new Map<number, string>();
 
   let utxos: WalletUtxoRow[] = [];
   if (wallet) {
@@ -133,7 +143,7 @@ export function snapshotFromDb(
           scriptPubKey: u.scriptPubKey,
           amountLabel: formatBtc(u.value),
           height,
-          ageLabel: timeLabelForHeight(db, height, nowMs),
+          ageLabel: timeLabelForHeight(db, height, nowMs, timeLabels),
           valueBar: utxoValueBar(u.value, maxValue),
           name: nameByOutpoint.get(key) ?? null,
         };
@@ -158,7 +168,7 @@ export function snapshotFromDb(
         txid: tx.txid,
         shortTxid: shortTxid(tx.txid),
         height: tx.height,
-        timeLabel: timeLabelForHeight(db, tx.height, nowMs),
+        timeLabel: timeLabelForHeight(db, tx.height, nowMs, timeLabels),
         netDeltaSats: tx.netDeltaSats,
         netDeltaLabel: formatNetDelta(delta),
       };
@@ -190,7 +200,7 @@ export function createWalletTxsStore(): WalletTxsStore {
         notify();
       }
     },
-    setBlockCounts(parsed, total) {
+    setBlockCounts(parsed, total, at) {
       if (
         snapshot.blocksParsed === parsed &&
         snapshot.blocksTotal === total
@@ -203,6 +213,16 @@ export function createWalletTxsStore(): WalletTxsStore {
       const isDone = total > 0 && parsed >= total;
       if (parsed < snapshot.blocksParsed || (wasDone && !isDone)) {
         samples = [];
+      }
+      if (at !== undefined && parsingActive) {
+        samples = nextProgressSamples(
+          samples,
+          {
+            downloaded: snapshot.blocksParsed,
+            total: snapshot.blocksTotal,
+          },
+          { at, downloaded: parsed, total },
+        );
       }
       let etaMs = snapshot.etaMs;
       if (!parsingActive) {
