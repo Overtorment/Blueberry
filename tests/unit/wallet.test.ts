@@ -118,6 +118,12 @@ describe("parseWalletSecret", () => {
       kind: "zpub",
       value: BLUE_ZPUB,
     });
+    expect(
+      parseWalletSecret(ABANDON.replaceAll(" ", "  ").toUpperCase()),
+    ).toEqual({
+      kind: "mnemonic",
+      value: ABANDON,
+    });
   });
 
   test("rejects invalid mnemonic, empty, xpub, vpub, master zpub, French words", () => {
@@ -132,6 +138,9 @@ describe("parseWalletSecret", () => {
       .publicExtendedKey;
     expect(() => parseWalletSecret(xpub)).toThrow(/zpub/);
     expect(() => deriveWatchWallet(xpub, 1)).toThrow();
+    expect(() => parseWalletSecret("zprv" + "1".repeat(107))).toThrow(
+      /mainnet account zpub/,
+    );
 
     const vpub = HDKey.fromMasterSeed(mnemonicToSeedSync(ABANDON), {
       private: 0x045f18bc,
@@ -227,6 +236,8 @@ describe("createWallet", () => {
     expect(wallet.scripts()).toHaveLength(4);
     const scripts1 = wallet.scripts();
     expect(wallet.syncFromDb().grew).toBe(false);
+    expect(wallet.scripts()).toBe(scripts1);
+    expect(wallet.refresh()).toBe(wallet.snapshot());
     expect(wallet.scripts()).toBe(scripts1);
 
     saveWatchGaps(db, { external: 5, internal: 2 });

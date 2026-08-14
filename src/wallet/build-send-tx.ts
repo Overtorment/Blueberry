@@ -12,6 +12,7 @@ import {
   Transaction,
 } from "@scure/btc-signer";
 import { scriptHex } from "../parse/extract.ts";
+import { isAddressValid } from "./is-address-valid.ts";
 import {
   BIP84_ZPUB_VERSIONS,
   decodeWifPrivateKey,
@@ -166,23 +167,33 @@ function addressesEqual(a: string | undefined, b: string): boolean {
   return aBech32 && bBech32 ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
-function changeSatsFromTx(tx: Transaction, changeAddress: string): bigint {
-  let changeSats = 0n;
+function changeSatsFromTx(
+  tx: Transaction,
+  changeAddress: string,
+  toAddress: string,
+  paymentAmount: bigint,
+): bigint {
+  let matched = 0n;
   for (let i = 0; i < tx.outputsLength; i++) {
     const out = tx.getOutput(i);
     if (
       addressesEqual(tx.getOutputAddress(i), changeAddress) &&
       out.amount !== undefined
     ) {
-      changeSats = out.amount;
+      matched += out.amount;
     }
   }
-  return changeSats;
+  if (addressesEqual(toAddress, changeAddress)) {
+    const change = matched - paymentAmount;
+    return change > 0n ? change : 0n;
+  }
+  return matched;
 }
 
 /**
  * scure only takes integer sat/vB. Select with ceil(rate), then move excess
  * into change so fee becomes ceil(rate × vsize).
+ * When dest === change, skip the payment output so the send amount stays put.
  */
 function applyFractionalFee(
   tx: Transaction,
@@ -190,6 +201,7 @@ function applyFractionalFee(
   selectedFee: bigint,
   rateSatPerVb: number,
   vsize: number,
+  paymentAmount?: bigint,
 ): bigint {
   const targetFee = BigInt(Math.ceil(rateSatPerVb * vsize));
   const excess = selectedFee - targetFee;
@@ -199,6 +211,7 @@ function applyFractionalFee(
     if (!addressesEqual(tx.getOutputAddress(i), changeAddress)) continue;
     const out = tx.getOutput(i);
     if (out.amount === undefined) continue;
+    if (paymentAmount !== undefined && out.amount === paymentAmount) continue;
     tx.updateOutput(i, { amount: out.amount + excess });
     return targetFee;
   }
@@ -237,22 +250,25 @@ function selectSendTx(
   if (!selected?.tx || selected.fee === undefined) {
     throw new Error("insufficient funds for amount and fee");
   }
-  if (sendMax) {
-    if (selected.tx.outputsLength !== 1) {
-      throw new Error("insufficient funds for amount and fee");
-    }
-    if (selected.tx.inputsLength !== params.utxos.length) {
-      throw new Error("some selected UTXOs are uneconomical at this fee rate");
-    }
+  if (selected.tx.inputsLength !== params.utxos.length) {
+    throw new Error("some selected UTXOs are uneconomical at this fee rate");
+  }
+  if (sendMax && selected.tx.outputsLength !== 1) {
+    throw new Error("insufficient funds for amount and fee");
   }
   const vsize = Math.ceil(selected.weight / 4);
   const feeAdjustAddress = sendMax ? params.toAddress : params.changeAddress;
+  const skipPayment =
+    !sendMax && addressesEqual(params.toAddress, params.changeAddress)
+      ? amount
+      : undefined;
   const feeSats = applyFractionalFee(
     selected.tx,
     feeAdjustAddress,
     selected.fee,
     params.feeRateSatPerVb,
     vsize,
+    skipPayment,
   );
   if (!sendMax) {
     let inputSum = 0n;
@@ -276,6 +292,12 @@ function buildDraftTx(params: BuildSendTxParams): {
   const sendMax = amount === "max";
   if (!sendMax && amount <= 0n) throw new Error("amount must be positive");
   if (!(params.feeRateSatPerVb > 0)) throw new Error("fee rate must be positive");
+  if (!isAddressValid(params.toAddress)) {
+    throw new Error("invalid destination address");
+  }
+  if (!sendMax && !isAddressValid(params.changeAddress)) {
+    throw new Error("invalid change address");
+  }
 
   const account = accountKey(params.secret);
   if (account.kind === "address" && !sendMax) {
@@ -443,7 +465,12 @@ export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult 
     changeSats:
       params.amountSats === "max"
         ? 0n
-        : changeSatsFromTx(tx, params.changeAddress),
+        : changeSatsFromTx(
+            tx,
+            params.changeAddress,
+            params.toAddress,
+            params.amountSats,
+          ),
   };
 }
 
@@ -462,7 +489,12 @@ export function buildUnsignedSendPsbt(
     changeSats:
       params.amountSats === "max"
         ? 0n
-        : changeSatsFromTx(tx, params.changeAddress),
+        : changeSatsFromTx(
+            tx,
+            params.changeAddress,
+            params.toAddress,
+            params.amountSats,
+          ),
   };
 }
 

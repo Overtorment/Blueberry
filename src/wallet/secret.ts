@@ -90,12 +90,7 @@ export function parseWalletSecret(raw: string): ParsedWalletSecret {
     return { kind: "zpub", value };
   }
 
-  if (
-    value.startsWith("xpub") ||
-    value.startsWith("ypub") ||
-    value.startsWith("vpub") ||
-    value.startsWith("tpub")
-  ) {
+  if (/^[xyzvt]p(?:ub|rv)/.test(value)) {
     throw new Error("only mainnet account zpub is supported");
   }
 
@@ -112,10 +107,11 @@ export function parseWalletSecret(raw: string): ParsedWalletSecret {
     throw new Error("invalid mainnet address");
   }
 
-  if (!validateMnemonic(value, wordlist)) {
+  const mnemonic = value.replace(/\s+/g, " ").toLowerCase();
+  if (!validateMnemonic(mnemonic, wordlist)) {
     throw new Error("invalid BIP39 mnemonic");
   }
-  return { kind: "mnemonic", value };
+  return { kind: "mnemonic", value: mnemonic };
 }
 
 export function hasWalletSecret(db: Kv): boolean {
