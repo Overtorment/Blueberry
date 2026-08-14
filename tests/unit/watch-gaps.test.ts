@@ -25,6 +25,18 @@ describe("watch gaps", () => {
     db.close();
   });
 
+  test("load clamps absurd persisted watch counts", () => {
+    const db = createSqliteDatabase(":memory:");
+    db.keyValue.set("watch_external", "1000000000");
+    db.keyValue.set("watch_internal", "-1");
+    expect(loadWatchGaps(db)).toEqual({
+      external: 10_000,
+      internal: config.initialWatchCount,
+    });
+    expect(db.keyValue.get("watch_external")).toBe("10000");
+    db.close();
+  });
+
   test("grows when used index in danger zone", () => {
     const r = growWatchGapsIfNeeded(
       { external: 40, internal: 40 },
@@ -45,12 +57,21 @@ describe("watch gaps", () => {
     expect(r.gaps).toEqual({ external: 40, internal: 40 });
   });
 
-  test("internal danger zone grows independently", () => {
-    const r = growWatchGapsIfNeeded(
-      { external: 40, internal: 40 },
-      { external: [], internal: [30] },
-      20,
+  test("growth stops at the watch cap so rematch cannot loop", () => {
+    const atCap = growWatchGapsIfNeeded(
+      { external: 10_000, internal: 10_000 },
+      { external: [9_999], internal: [] },
+      100,
     );
-    expect(r.gaps).toEqual({ external: 40, internal: 60 });
+    expect(atCap.grew).toBe(false);
+    expect(atCap.gaps).toEqual({ external: 10_000, internal: 10_000 });
+
+    const nearCap = growWatchGapsIfNeeded(
+      { external: 9_950, internal: 40 },
+      { external: [9_900], internal: [] },
+      100,
+    );
+    expect(nearCap.grew).toBe(true);
+    expect(nearCap.gaps).toEqual({ external: 10_000, internal: 40 });
   });
 });

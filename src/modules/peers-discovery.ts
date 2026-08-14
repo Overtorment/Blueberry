@@ -54,8 +54,10 @@ export function createPeersDiscoveryModule(
 
   let stopped = true;
   let paused = false;
+  let syncIdle = false;
   let unsubIdle: (() => void) | undefined;
   let unsubCatchup: (() => void) | undefined;
+  let unsubPeers: (() => void) | undefined;
   let wake: (() => void) | undefined;
   let lastReseedAt = 0;
   let dnsInFlight = false;
@@ -63,6 +65,14 @@ export function createPeersDiscoveryModule(
 
   function kick() {
     wake?.();
+  }
+
+  /** Pause probes only while idle *and* we still have a live peer. */
+  function refreshPause(): void {
+    const wantPause = syncIdle && ctx.db.peers.listAlive().length > 0;
+    if (wantPause === paused) return;
+    paused = wantPause;
+    kick();
   }
 
   function emitUpdated() {
@@ -270,12 +280,15 @@ export function createPeersDiscoveryModule(
       });
       stopped = false;
       unsubIdle = ctx.bus.on("sync:idle", () => {
-        paused = true;
-        kick();
+        syncIdle = true;
+        refreshPause();
       });
       unsubCatchup = ctx.bus.on("sync:catchup", () => {
-        paused = false;
-        kick();
+        syncIdle = false;
+        refreshPause();
+      });
+      unsubPeers = ctx.bus.on("peers:updated", () => {
+        if (syncIdle) refreshPause();
       });
       // Don't await DNS bootstrap — it blocks the whole module start chain
       // (and filters-matching) when the peer table is empty.
@@ -291,7 +304,9 @@ export function createPeersDiscoveryModule(
       stopped = true;
       unsubIdle?.();
       unsubCatchup?.();
+      unsubPeers?.();
       paused = false;
+      syncIdle = false;
       kick();
       // Shutdown ignores in-flight probes; report zero open for the TUI.
       inflight.clear();

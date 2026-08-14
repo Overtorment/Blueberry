@@ -136,7 +136,7 @@ function accountKey(secret: string): AccountKey {
   return {
     kind: "zpub",
     key: account,
-    masterFingerprint: 0,
+    masterFingerprint: account.fingerprint,
   };
 }
 
@@ -291,7 +291,9 @@ function buildDraftTx(params: BuildSendTxParams): {
   const amount = params.amountSats;
   const sendMax = amount === "max";
   if (!sendMax && amount <= 0n) throw new Error("amount must be positive");
-  if (!(params.feeRateSatPerVb > 0)) throw new Error("fee rate must be positive");
+  if (!Number.isFinite(params.feeRateSatPerVb) || params.feeRateSatPerVb <= 0) {
+    throw new Error("fee rate must be positive");
+  }
   if (!isAddressValid(params.toAddress)) {
     throw new Error("invalid destination address");
   }
@@ -357,9 +359,10 @@ function buildDraftTx(params: BuildSendTxParams): {
     // BIP84 HD: always p2wpkh
     const pubkey = publicKeyAtAddress(account, addr);
     const spend = p2wpkh(pubkey);
-    const pathNums = bip32Path(
-      addr.path.startsWith("m/") ? addr.path : `m/${addr.path}`,
-    );
+    const pathNums =
+      account.kind === "zpub"
+        ? bip32Path(`m/${addr.change ? 1 : 0}/${addr.index}`)
+        : bip32Path(addr.path.startsWith("m/") ? addr.path : `m/${addr.path}`);
     return {
       ...spend,
       txid: hex.decode(u.txid),

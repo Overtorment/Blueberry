@@ -62,6 +62,8 @@ export type HeaderSessionPoolOptions = {
   }>;
   /** Fired when open socket count may have changed (live or connecting). */
   onOpenCount?: (open: number) => void;
+  /** Cap on live + opening sessions. Default 2 × headerRacePeers. */
+  max?: number;
 };
 
 const ZERO_HASH = new Uint8Array(32);
@@ -208,6 +210,8 @@ export type HeaderSessionPool = {
   has(host: string, port: number): boolean;
   /** True when connecting/handshaking or a live session is mid-getheaders. */
   isBusy(host: string, port: number): boolean;
+  /** True when live + opening sessions are at the pool cap. */
+  isFull(): boolean;
   fetchBatch(
     host: string,
     port: number,
@@ -231,6 +235,7 @@ export function createHeaderSessionPool(
     poolOptions.connectTimeoutMs ?? config.peerProbeTimeoutMs;
   const defaultHeadersTimeoutMs =
     poolOptions.headersTimeoutMs ?? config.headerSyncTimeoutMs;
+  const max = Math.max(1, poolOptions.max ?? config.headerRacePeers * 2);
   const onOpenCount = poolOptions.onOpenCount;
   const connect = poolOptions.connect;
   const sessions = new Map<string, LiveSession>();
@@ -347,6 +352,10 @@ export function createHeaderSessionPool(
       return sessions.get(key)?.busy === true || connecting.has(key);
     },
 
+    isFull() {
+      return openCount() >= max;
+    },
+
     async fetchBatch(host, port, options) {
       const key = peerKey(host, port);
       const connectTimeoutMs =
@@ -360,6 +369,9 @@ export function createHeaderSessionPool(
       try {
         if (!session) {
           if (connecting.has(key)) {
+            return { ok: false, error: SESSION_BUSY_ERROR };
+          }
+          if (openCount() >= max) {
             return { ok: false, error: SESSION_BUSY_ERROR };
           }
           connecting.add(key);

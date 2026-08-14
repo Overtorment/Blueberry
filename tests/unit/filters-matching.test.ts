@@ -418,4 +418,41 @@ describe("filters-matching", () => {
     await mod.stop();
     db.close();
   });
+
+  test("scan throw does not stop the matching loop", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const inner = createWallet(db, { secret: ABANDON_MNEMONIC, addressGap: 4 });
+    const hash = "88".repeat(32);
+    appendFilter(db, 800, hash, [inner.snapshot().addresses[0]!.scriptPubKey]);
+
+    let syncs = 0;
+    const wallet = {
+      ...inner,
+      syncFromDb: () => {
+        syncs++;
+        if (syncs === 1) throw new Error("scan boom");
+        return inner.syncFromDb();
+      },
+    };
+
+    const hits: number[] = [];
+    bus.on("filters:match", (p) => hits.push(p.height));
+    const errors: string[] = [];
+    bus.on("module:status", (p) => {
+      if (p.module === "filters-matching" && p.status === "error") {
+        errors.push(p.detail ?? "");
+      }
+    });
+
+    const mod = createFiltersMatchingModule(
+      { bus, db },
+      { wallet, batchGapMs: 0, yieldFn: async () => {} },
+    );
+    await mod.start();
+    await waitFor(() => hits.includes(800));
+    expect(errors.some((d) => d.includes("scan boom"))).toBe(true);
+    await mod.stop();
+    db.close();
+  });
 });

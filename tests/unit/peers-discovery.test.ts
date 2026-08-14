@@ -601,6 +601,97 @@ describe("peers-discovery", () => {
       services: 0n,
       alive: true,
       usedForBlocks: false,
+      lastProbedAt: Date.now(),
+    });
+    db.peers.upsert({
+      host: "2.2.2.2",
+      port: 8333,
+      services: 0n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    let probes = 0;
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        probe: async () => {
+          probes++;
+          return { ok: false, error: "no" };
+        },
+        concurrency: 1,
+        idleDelayMs: 20,
+        probeTimeoutMs: 60_000,
+        minAliveCompactFilters: 0,
+      },
+    );
+    await mod.start();
+    await waitFor(() => probes >= 1);
+    const atIdle = probes;
+    bus.emit("sync:idle", { at: Date.now() });
+    await new Promise((r) => setTimeout(r, 80));
+    expect(probes).toBe(atIdle);
+    db.peers.upsert({
+      host: "3.3.3.3",
+      port: 8333,
+      services: 0n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+    bus.emit("sync:catchup", { at: Date.now(), reason: "headers" });
+    await waitFor(() => probes > atIdle);
+    await mod.stop();
+    db.close();
+  });
+
+  test("sync:idle keeps probing when no peer is alive", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "2.2.2.2",
+      port: 8333,
+      services: 0n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    let probes = 0;
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        probe: async () => {
+          probes++;
+          return { ok: false, error: "offline" };
+        },
+        concurrency: 1,
+        idleDelayMs: 20,
+        probeTimeoutMs: 20,
+        minAliveCompactFilters: 0,
+      },
+    );
+    await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
+    await waitFor(() => probes >= 1);
+    await mod.stop();
+    db.close();
+  });
+
+  test("sync:idle resumes probes after the last alive peer dies", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 0n,
+      alive: true,
+      usedForBlocks: false,
       lastProbedAt: null,
     });
     db.peers.upsert({
@@ -624,16 +715,17 @@ describe("peers-discovery", () => {
         },
         concurrency: 1,
         idleDelayMs: 20,
+        probeTimeoutMs: 20,
         minAliveCompactFilters: 0,
       },
     );
     await mod.start();
     await waitFor(() => probes >= 1);
-    const atIdle = probes;
     bus.emit("sync:idle", { at: Date.now() });
     await new Promise((r) => setTimeout(r, 80));
-    expect(probes).toBe(atIdle);
-    bus.emit("sync:catchup", { at: Date.now(), reason: "headers" });
+    const atIdle = probes;
+    db.peers.markAlive("1.1.1.1", 8333, false);
+    bus.emit("peers:updated", { at: Date.now() });
     await waitFor(() => probes > atIdle);
     await mod.stop();
     db.close();

@@ -12,7 +12,7 @@ import {
 import { config } from "../config.ts";
 import { log as writeLog } from "../log.ts";
 import { createFilterSessionPool } from "../net/filter-session-pool.ts";
-import { inspectWalletBirthday } from "../wallet/birthday.ts";
+import { compactFilterFrom, inspectWalletBirthday } from "../wallet/birthday.ts";
 import {
   openFilterSession,
   type FilterSessionApi,
@@ -658,10 +658,15 @@ export function createFiltersDownloadModule(
             break;
           }
 
-          // Created wallets: cfilters only from birthday. Filter *headers* may
-          // start at the prior BIP157 checkpoint so auth works at the tip.
-          const filterFrom =
-            birthday.status === "ok" ? Math.max(birthday.height, minH) : minH;
+          const filterFrom = compactFilterFrom(ctx.db);
+          if (filterFrom === null) {
+            ctx.bus.emit("filters:progress", {
+              at: now(),
+              downloaded: 0,
+              total: 0,
+            });
+            break;
+          }
           if (tip.height < filterFrom) {
             await waitForKick(idleDelayMs);
             continue;

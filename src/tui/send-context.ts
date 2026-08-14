@@ -31,11 +31,10 @@ function attachNonWitnessUtxos(
   db: Database,
   utxos: SendInputUtxo[],
 ): SendInputUtxo[] {
-  const byTxid = new Map(db.transactions.list().map((t) => [t.txid, t.tx]));
   return utxos.map((u) => {
     if (u.nonWitnessUtxo) return u;
-    const prev = byTxid.get(u.txid);
-    return prev ? { ...u, nonWitnessUtxo: prev } : u;
+    const prev = db.transactions.get(u.txid);
+    return prev ? { ...u, nonWitnessUtxo: prev.tx } : u;
   });
 }
 

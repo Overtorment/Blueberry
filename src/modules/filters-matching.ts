@@ -3,6 +3,7 @@ import {
   MATCH_FILTER_BATCH_SIZE,
   scanFiltersForMatches,
 } from "../match/scan.ts";
+import { compactFilterFrom } from "../wallet/birthday.ts";
 import type { WatchGaps } from "../wallet/derive.ts";
 import type { Wallet } from "../wallet/wallet.ts";
 import { detachLoop } from "./detach-loop.ts";
@@ -95,7 +96,8 @@ export function createFiltersMatchingModule(
           (loadedGaps.external !== gaps.external ||
             loadedGaps.internal !== gaps.internal)
         ) {
-          const fromHeight = ctx.db.transactions.minHeight();
+          const fromHeight =
+            compactFilterFrom(ctx.db) ?? ctx.db.transactions.minHeight();
           if (fromHeight !== null) {
             ctx.db.filters.markUnscannedFrom(fromHeight);
           }
@@ -147,7 +149,9 @@ export function createFiltersMatchingModule(
           detail: err instanceof Error ? err.message : String(err),
         });
         busy = false;
-        return;
+        if (stopped) return;
+        await waitForKick();
+        continue;
       }
       busy = false;
       if (stopped) return;

@@ -66,6 +66,10 @@ describe("parsed blocks + transactions", () => {
       netDeltaSum: 92,
       newestTxid: "a".repeat(64),
     });
+    expect(db.transactions.get("b".repeat(64))?.tx).toEqual(
+      new Uint8Array([0xbb]),
+    );
+    expect(db.transactions.get("c".repeat(64))).toBeNull();
 
     db.close();
   });

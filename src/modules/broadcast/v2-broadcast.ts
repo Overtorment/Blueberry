@@ -5,8 +5,10 @@ import {
   answerPing,
   completeVersionHandshake,
   decodeTransaction,
+  encodeTransaction,
   equalBytes,
   hexToBytes,
+  sha256d,
   transactionId,
   type ByteDuplex,
   type Transaction,
@@ -14,6 +16,7 @@ import {
 
 const MSG_TX = 1;
 const MSG_WTX = 5;
+const MSG_WITNESS_FLAG = 1 << 30;
 
 export type BroadcastTxV2Options = {
   port: number;
@@ -73,12 +76,13 @@ function armDuplexDeadline(
 function inventoryMentionsTx(
   inventory: { type: number; hash: Uint8Array }[],
   txidInternal: Uint8Array,
+  wtxidInternal: Uint8Array,
 ): boolean {
-  return inventory.some(
-    (item) =>
-      (item.type === MSG_TX || item.type === MSG_WTX) &&
-      equalBytes(item.hash, txidInternal),
-  );
+  return inventory.some((item) => {
+    if (item.type === MSG_WTX) return equalBytes(item.hash, wtxidInternal);
+    const base = item.type & ~MSG_WITNESS_FLAG;
+    return base === MSG_TX && equalBytes(item.hash, txidInternal);
+  });
 }
 
 /**
@@ -96,6 +100,7 @@ export async function broadcastTxV2(
 
   const wireTx = decodeBroadcastTx(txHex);
   const txidInternal = transactionId(wireTx);
+  const wtxidInternal = sha256d(encodeTransaction(wireTx));
 
   if (signal?.aborted) {
     throw abortError(signal, "broadcast aborted");
@@ -153,7 +158,7 @@ export async function broadcastTxV2(
         }
         if (
           (msg.command === "inv" || msg.command === "getdata") &&
-          inventoryMentionsTx(msg.payload.inventory, txidInternal)
+          inventoryMentionsTx(msg.payload.inventory, txidInternal, wtxidInternal)
         ) {
           return;
         }

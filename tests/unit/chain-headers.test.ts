@@ -658,6 +658,46 @@ describe("chain-headers", () => {
     db.close();
   });
 
+  test("while sync:idle with no peers, peers:updated resumes fetchBatch", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.headers.ensureCheckpoint(checkpointDbRecord());
+
+    let calls = 0;
+    const mod = createChainHeadersModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        pollIntervalMs: 10_000,
+        fetchBatch: async () => {
+          calls++;
+          return {
+            ok: true as const,
+            startHeight: db.headers.tip()!.height,
+            headers: [],
+          };
+        },
+      },
+    );
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 30));
+    bus.emit("sync:idle", { at: Date.now() });
+    expect(calls).toBe(0);
+
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 0n,
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+    bus.emit("peers:updated", { at: Date.now() });
+    await waitFor(() => calls >= 1);
+    await mod.stop();
+    db.close();
+  });
+
   test("does not freeze birthday while local tip is behind peer tip", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");

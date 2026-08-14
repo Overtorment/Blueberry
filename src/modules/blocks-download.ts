@@ -129,7 +129,7 @@ export function createBlocksDownloadModule(
 
   function leasePeer(): PeerRef | null {
     pruneCooldowns();
-    // SQL-filter unused NODE_NETWORK peers — don't scan the full alive table.
+    // One successful block per peer (privacy). Never fall back to used peers.
     const candidates = ctx.db.peers
       .listAliveWithServices(NODE_NETWORK, 512, { unusedForBlocks: true })
       .filter((p) => {
@@ -137,8 +137,6 @@ export function createBlocksDownloadModule(
         return !leasedPeers.has(key) && !peerCoolUntil.has(key);
       });
     if (candidates.length === 0) return null;
-    // First remaining unused/unleased/uncooled peer. Cooldown already skips a
-    // dead prefix of ORDER BY host, port — no extra cursor needed.
     const peer = {
       host: candidates[0]!.host,
       port: candidates[0]!.port,
