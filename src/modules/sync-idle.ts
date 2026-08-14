@@ -56,23 +56,26 @@ export function createSyncIdleModule(
         ? 1
         : 0;
 
-    const aliveCompactFilterCount = ctx.db.peers.listAliveWithServices(
-      BigInt(NODE_COMPACT_FILTERS),
-      minAliveCompactFilters,
-    ).length;
-
-    const needingDownload = ctx.db.matchedBlocks.listNeedingDownload(1);
+    const needingDownloadCount =
+      ctx.db.matchedBlocks.listNeedingDownload(1).length;
+    // CF pool size only changes the catchup *reason* when leaving idle with
+    // filter work. Skip the extra scan on the catchup/idle-complete path.
+    const filterWorkNeedsPeers =
+      mode === "idle" &&
+      filterMissingRangeCount > 0 &&
+      ctx.db.peers.listAliveWithServices(
+        BigInt(NODE_COMPACT_FILTERS),
+        minAliveCompactFilters,
+      ).length < minAliveCompactFilters;
 
     return {
       headersDownloaded,
       headersTotal,
       filterMissingRangeCount,
-      filterWorkNeedsPeers:
-        filterMissingRangeCount > 0 &&
-        aliveCompactFilterCount < minAliveCompactFilters,
+      filterWorkNeedsPeers,
       blocksDownloaded,
       blocksMatched,
-      needingDownloadCount: needingDownload.length,
+      needingDownloadCount,
       alivePeerCount,
     };
   }
@@ -113,6 +116,13 @@ export function createSyncIdleModule(
     applyEvaluation(evaluateSyncState(buildSnapshot()));
   }
 
+  // Match/peer churn is noisy during catchup and cannot transition
+  // until a progress eval starts the idle streak.
+  function evaluateAfterChurn(): void {
+    if (mode === "catchup" && idleStreak === 0) return;
+    evaluate();
+  }
+
   return {
     name: "sync-idle",
     async start() {
@@ -143,12 +153,8 @@ export function createSyncIdleModule(
         ctx.bus.on("filters:progress", () => {
           evaluate();
         }),
-        ctx.bus.on("filters:match", () => {
-          evaluate();
-        }),
-        ctx.bus.on("peers:updated", () => {
-          evaluate();
-        }),
+        ctx.bus.on("filters:match", evaluateAfterChurn),
+        ctx.bus.on("peers:updated", evaluateAfterChurn),
       );
 
       intervalId = setInterval(evaluate, evalIntervalMs);
