@@ -157,6 +157,12 @@ describe("SqliteDatabase filters", () => {
       { from: 103, to: 104 },
       { from: 105, to: 105 },
     ]);
+    // Fast path must not expand backward below `from`.
+    expect(db.filters.missingRanges(105, 110, 2)).toEqual([
+      { from: 105, to: 106 },
+      { from: 107, to: 108 },
+      { from: 109, to: 110 },
+    ]);
     db.close();
   });
 

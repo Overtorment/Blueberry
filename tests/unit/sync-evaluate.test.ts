@@ -29,6 +29,12 @@ describe("evaluateSyncState", () => {
     ).toEqual({ mode: "catchup", reason: "peers" });
   });
 
+  test("locally complete with no peers → idle", () => {
+    expect(evaluateSyncState(base({ alivePeerCount: 0 }))).toEqual({
+      mode: "idle",
+    });
+  });
+
   test("unknown or behind tip → headers", () => {
     expect(evaluateSyncState(base({ headersTotal: 0 }))).toEqual({
       mode: "catchup",

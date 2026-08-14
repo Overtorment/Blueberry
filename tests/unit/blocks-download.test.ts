@@ -214,6 +214,45 @@ describe("blocks-download", () => {
     db.close();
   });
 
+  test("does not reuse a used peer when it is the only NODE_NETWORK peer", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const b0 = makeVariantBlock(0);
+    const b1 = makeVariantBlock(1);
+    const h0 = internalHashHex(b0);
+    const h1 = internalHashHex(b1);
+
+    db.matchedBlocks.insert({ height: 0, blockHashInternalHex: h0 });
+    db.matchedBlocks.insert({ height: 1, blockHashInternalHex: h1 });
+    seedPeer(db, "1.1.1.1");
+
+    const opened: string[] = [];
+    const mod = createBlocksDownloadModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        openSession: makeOpenSession(
+          new Map([
+            [h0, b0],
+            [h1, b1],
+          ]),
+          { onOpen: (host) => opened.push(host) },
+        ),
+        concurrency: 1,
+        idleDelayMs: 50,
+      },
+    );
+    await mod.start();
+    await waitFor(() => db.blocks.count() === 1);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(opened).toEqual(["1.1.1.1"]);
+    expect(db.blocks.count()).toBe(1);
+    expect(db.peers.list()[0]!.usedForBlocks).toBe(true);
+
+    await mod.stop();
+    db.close();
+  });
+
   test("idle resumes on filters:match", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");

@@ -226,4 +226,34 @@ describe("HeaderSessionPool", () => {
     expect(closed).toBe(true);
     await pool.closeAll();
   });
+
+  test("refuses to open past max sessions", async () => {
+    let opens = 0;
+    const pool = createHeaderSessionPool({
+      max: 1,
+      openSession: async () => {
+        opens++;
+        return {
+          startHeight: 1,
+          requestHeaders: async () => ({ startHeight: 1, headers: [] }),
+          close: async () => {},
+        };
+      },
+    });
+
+    const first = await pool.fetchBatch("1.1.1.1", 8333, {
+      locatorHashes: [new Uint8Array(32)],
+    });
+    const second = await pool.fetchBatch("2.2.2.2", 8333, {
+      locatorHashes: [new Uint8Array(32)],
+    });
+    expect(first.ok).toBe(true);
+    expect(second).toEqual({ ok: false, error: "session busy" });
+    expect(opens).toBe(1);
+    expect(pool.has("1.1.1.1", 8333)).toBe(true);
+    expect(pool.has("2.2.2.2", 8333)).toBe(false);
+    expect(pool.isFull()).toBe(true);
+    await pool.closeAll();
+    expect(pool.isFull()).toBe(false);
+  });
 });

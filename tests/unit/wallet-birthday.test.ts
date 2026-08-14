@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 import {
   WALLET_BIRTHDAY_HEIGHT_KEY,
+  compactFilterFrom,
   inspectWalletBirthday,
   markWalletBirthdayPending,
   maybeFreezeWalletBirthday,
@@ -30,6 +31,24 @@ describe("wallet birthday", () => {
 
     db.keyValue.set(WALLET_BIRTHDAY_HEIGHT_KEY, "nope");
     expect(inspectWalletBirthday(db)).toEqual({ status: "none" });
+    db.close();
+  });
+
+  test("compactFilterFrom uses birthday floor when set, else header min", () => {
+    const db = createSqliteDatabase(":memory:");
+    expect(compactFilterFrom(db)).toBeNull();
+    db.headers.append([
+      {
+        height: 100,
+        hashInternalHex: "aa".repeat(32),
+        header: new Uint8Array(80),
+      },
+    ]);
+    expect(compactFilterFrom(db)).toBe(100);
+    db.keyValue.set(WALLET_BIRTHDAY_HEIGHT_KEY, "150");
+    expect(compactFilterFrom(db)).toBe(150);
+    db.keyValue.set(WALLET_BIRTHDAY_HEIGHT_KEY, "80");
+    expect(compactFilterFrom(db)).toBe(100);
     db.close();
   });
 });

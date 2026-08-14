@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { hex } from "@scure/base";
+import { HDKey } from "@scure/bip32";
 import { Transaction } from "@scure/btc-signer";
 import {
   buildSend,
@@ -7,6 +8,7 @@ import {
   buildUnsignedSendPsbt,
 } from "../../src/wallet/build-send-tx.ts";
 import { deriveWatchWallet } from "../../src/wallet/derive.ts";
+import { BIP84_ZPUB_VERSIONS } from "../../src/wallet/secret.ts";
 
 /**
  * BIP84 abandon / feerate checks from BlueWallet:
@@ -263,6 +265,13 @@ describe("buildSignedSendTx", () => {
       buildSignedSendTx({
         ...base,
         secret: MNEMONIC,
+        feeRateSatPerVb: Infinity,
+      }),
+    ).toThrow(/fee rate/);
+    expect(() =>
+      buildSignedSendTx({
+        ...base,
+        secret: MNEMONIC,
         amountSats: 200_000n,
       }),
     ).toThrow(/insufficient/);
@@ -342,5 +351,27 @@ describe("buildSend / unsigned PSBT", () => {
     expect(tx.outputsLength).toBe(1);
     expect(tx.getOutputAddress(0)).toBe(BLUE_EXTERNAL_1);
     expect(tx.getOutput(0).amount).toBe(utxo.valueSats - result.feeSats);
+  });
+
+  test("zpub PSBT origin uses account fingerprint and relative path", () => {
+    const zWallet = deriveWatchWallet(BLUE_ZPUB, { external: 2, internal: 1 });
+    const account = HDKey.fromExtendedKey(BLUE_ZPUB, BIP84_ZPUB_VERSIONS);
+    const psbt = buildSend({
+      secret: BLUE_ZPUB,
+      wallet: zWallet,
+      utxos: [utxoAt(zWallet)],
+      toAddress: BLUE_EXTERNAL_1,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 10,
+      changeAddress: BLUE_INTERNAL_0,
+    });
+    expect(psbt.kind).toBe("psbt");
+    if (psbt.kind !== "psbt") throw new Error("unreachable");
+    const tx = Transaction.fromPSBT(hex.decode(psbt.psbtHex));
+    const der = tx.getInput(0).bip32Derivation;
+    expect(der).toBeDefined();
+    const origin = der?.[0]?.[1];
+    expect(origin?.fingerprint).toBe(account.fingerprint);
+    expect(origin?.path).toEqual([0, 0]);
   });
 });

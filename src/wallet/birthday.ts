@@ -30,6 +30,16 @@ export function inspectWalletBirthday(db: Kv): WalletBirthdayInspection {
   return { status: "ok", height };
 }
 
+/** Compact-filter scan floor: birthday if set, otherwise the stored header min. */
+export function compactFilterFrom(
+  db: Kv & { headers: { minHeight(): number | null } },
+): number | null {
+  const minH = db.headers.minHeight();
+  if (minH === null) return null;
+  const birthday = inspectWalletBirthday(db);
+  return birthday.status === "ok" ? Math.max(birthday.height, minH) : minH;
+}
+
 /** Freeze pending birthday to `height`. No-op if not pending. Returns whether written. */
 export function maybeFreezeWalletBirthday(db: Kv, height: number): boolean {
   if (!Number.isInteger(height) || height < 0) return false;

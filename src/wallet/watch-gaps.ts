@@ -5,6 +5,8 @@ import {
   type WatchGaps,
 } from "./derive.ts";
 
+const MAX_WATCH_COUNT = 10_000;
+
 export function saveWatchGaps(
   db: { keyValue: { set(k: string, v: string): void } },
   gaps: WatchGaps,
@@ -18,13 +20,19 @@ export function loadWatchGaps(db: {
 }): WatchGaps {
   const parse = (v: string | null) => {
     const n = v === null ? NaN : Number.parseInt(v, 10);
-    return Number.isFinite(n) && n >= 0 ? n : config.initialWatchCount;
+    if (!Number.isFinite(n) || n < 0) return config.initialWatchCount;
+    return Math.min(Math.floor(n), MAX_WATCH_COUNT);
   };
   const extRaw = db.keyValue.get(WATCH_EXTERNAL_KEY);
   const intRaw = db.keyValue.get(WATCH_INTERNAL_KEY);
   const external = parse(extRaw);
   const internal = parse(intRaw);
-  if (extRaw === null || intRaw === null) {
+  if (
+    extRaw === null ||
+    intRaw === null ||
+    extRaw !== String(external) ||
+    intRaw !== String(internal)
+  ) {
     saveWatchGaps(db, { external, internal });
   }
   return { external, internal };
@@ -38,7 +46,8 @@ export function growWatchGapsIfNeeded(
 ): { gaps: WatchGaps; grew: boolean } {
   const bump = (n: number, idxs: number[]) => {
     const start = n < gapLimit ? 0 : n - gapLimit;
-    return idxs.some((i) => i >= start && i < n) ? n + gapLimit : n;
+    if (!idxs.some((i) => i >= start && i < n)) return n;
+    return Math.min(n + gapLimit, MAX_WATCH_COUNT);
   };
   const external = bump(gaps.external, used.external);
   const internal = bump(gaps.internal, used.internal);

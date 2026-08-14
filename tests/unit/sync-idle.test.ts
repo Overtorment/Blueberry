@@ -84,6 +84,49 @@ function enterIdle(bus: ReturnType<typeof createMessageBus>) {
 }
 
 describe("sync-idle", () => {
+  test("seeds headers from DB so restart can idle without headers:progress", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: BigInt(NODE_COMPACT_FILTERS),
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+    db.headers.ensureCheckpoint(checkpointDbRecord());
+    const cp = db.headers.tip()!;
+    const tipHeight = cp.height + 1;
+    const tipHash = "ab".repeat(32);
+    db.headers.append([
+      {
+        height: tipHeight,
+        hashInternalHex: tipHash,
+        header: hexToBytes("00".repeat(80)),
+      },
+    ]);
+    markWalletBirthdayPending(db);
+    maybeFreezeWalletBirthday(db, tipHeight);
+    db.filters.append([
+      {
+        height: tipHeight,
+        blockHashInternalHex: tipHash,
+        filter: hexToBytes("00"),
+      },
+    ]);
+
+    const idles: number[] = [];
+    bus.on("sync:idle", (p) => idles.push(p.at));
+    const mod = createSyncIdleModule(
+      { bus, db },
+      { evalIntervalMs: 20, minAliveCompactFilters: 1 },
+    );
+    await mod.start();
+    await waitFor(() => idles.length >= 1);
+    await mod.stop();
+    db.close();
+  });
   test("needs two idle evals; then emits once (no re-spam)", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
@@ -204,7 +247,7 @@ describe("sync-idle", () => {
     db.close();
   });
 
-  test("idle → catchup:peers when last alive peer dies", async () => {
+  test("stays idle when last alive peer dies after local catch-up", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
     seedCaughtUpDb(db);
@@ -224,8 +267,8 @@ describe("sync-idle", () => {
 
     db.peers.markAlive("1.1.1.1", 8333, false);
     bus.emit("peers:updated", { at: Date.now() });
-    await waitFor(() => catchups.includes("peers"));
-    expect(catchups).toEqual(["peers"]);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(catchups).toEqual([]);
 
     await mod.stop();
     db.close();

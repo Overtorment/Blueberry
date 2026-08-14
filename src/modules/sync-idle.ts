@@ -1,7 +1,7 @@
 import { NODE_COMPACT_FILTERS } from "bip157";
 import { evaluateSyncState } from "../sync/evaluate.ts";
 import type { SyncMode, SyncSnapshot } from "../sync/types.ts";
-import { inspectWalletBirthday } from "../wallet/birthday.ts";
+import { compactFilterFrom, inspectWalletBirthday } from "../wallet/birthday.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 /** Bitcoin NODE_NETWORK — peer can serve historical blocks. */
@@ -40,8 +40,7 @@ export function createSyncIdleModule(
     const birthday = inspectWalletBirthday(ctx.db);
     let filterMissingRangeCount = 1;
     if (minH !== null && tip !== null && birthday.status !== "pending") {
-      const filterFrom =
-        birthday.status === "ok" ? Math.max(birthday.height, minH) : minH;
+      const filterFrom = compactFilterFrom(ctx.db)!;
       filterMissingRangeCount =
         tip.height < filterFrom ||
         !ctx.db.filters.completeInRange(filterFrom, tip.height)
@@ -134,8 +133,15 @@ export function createSyncIdleModule(
       stopped = false;
       mode = "catchup";
       idleStreak = 0;
-      headersDownloaded = 0;
-      headersTotal = 0;
+      const tip = ctx.db.headers.tip();
+      const minH = ctx.db.headers.minHeight();
+      if (tip && minH !== null) {
+        headersDownloaded = Math.max(0, tip.height - minH);
+        headersTotal = headersDownloaded;
+      } else {
+        headersDownloaded = 0;
+        headersTotal = 0;
+      }
       blocksDownloaded = ctx.db.blocks.count();
       blocksMatched = ctx.db.matchedBlocks.count();
 

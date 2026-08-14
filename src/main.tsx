@@ -28,6 +28,7 @@ import { createHeadersProgressStore } from "./tui/headers-progress-store.ts";
 import { createMatchingProgressStore } from "./tui/matching-progress-store.ts";
 import { createPeerSocketsStore } from "./tui/peer-sockets-store.ts";
 import { createModuleStatusStore } from "./tui/status-store.ts";
+import { shouldHardQuit } from "./tui/quit-key.ts";
 import { createTuiModule } from "./tui/tui-module.ts";
 import { createReceiveAddressStore } from "./tui/receive-address-store.ts";
 import { createWalletTxsStore } from "./tui/wallet-txs-store.ts";
@@ -274,7 +275,7 @@ async function startApp(db: Database): Promise<void> {
   }
 
   renderer.keyInput.on("keypress", (key) => {
-    if (key.name === "q" || key.name === "Q") shutdown();
+    if (shouldHardQuit(key, renderer.currentFocusedEditor)) shutdown();
   });
 
   process.once("SIGINT", shutdown);

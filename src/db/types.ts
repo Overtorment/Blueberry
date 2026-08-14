@@ -204,6 +204,8 @@ export interface TransactionsRepository {
   fingerprint(): TxSetFingerprint;
   /** Lowest stored wallet tx height, or null if empty. */
   minHeight(): number | null;
+  /** One stored tx by txid, or null. */
+  get(txid: string): StoredTx | null;
   setNetDelta(txid: string, netDeltaSats: number): void;
 }
 

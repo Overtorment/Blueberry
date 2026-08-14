@@ -2,7 +2,7 @@ import { Block } from "bitcoinjs-lib";
 import { buildUtxoMap, netDeltasForTxs } from "../parse/balance.ts";
 import { extractWatchTxs } from "../parse/extract.ts";
 import { usedWatchIndexes } from "../parse/used-indexes.ts";
-import { inspectWalletBirthday } from "../wallet/birthday.ts";
+import { compactFilterFrom } from "../wallet/birthday.ts";
 import type { Wallet } from "../wallet/wallet.ts";
 import {
   growWatchGapsIfNeeded,
@@ -14,15 +14,15 @@ import type { Module, ModuleContext } from "./types.ts";
 
 const DEFAULT_BATCH_SIZE = 32;
 const DEFAULT_IDLE_DELAY_MS = 1_000;
-/** Pause between blocks so other event-loop work can run. */
-const DEFAULT_BLOCK_GAP_MS = 1000;
+/** Pause between blocks so other event-loop work can run. 0 = yield only. */
+const DEFAULT_BLOCK_GAP_MS = 0;
 
 export type ParseBlocksOptions = {
   wallet: Wallet;
   batchSize?: number;
   /** Backoff after an unexpected batch error (default 1000ms). Idle waits are kick-driven. */
   idleDelayMs?: number;
-  /** Sleep between parsed blocks (default 1000ms). Use 0 in tests. */
+  /** Sleep between parsed blocks (default 0). Use 0 in tests. */
   blockGapMs?: number;
   now?: () => number;
   /** Test seam: called at the start of each batch while busy. */
@@ -114,22 +114,15 @@ export function createParseBlocksModule(
     wallet.refresh();
     // Rematch filters; clear parsed so prior FP downloads get re-parsed
     // against the expanded watchlist. Keep matched_blocks / blocks.
-    const fromHeight = ctx.db.transactions.minHeight();
+    const fromHeight =
+      compactFilterFrom(ctx.db) ?? ctx.db.transactions.minHeight();
     if (fromHeight !== null) {
       ctx.db.filters.markUnscannedFrom(fromHeight);
       ctx.db.parsedBlocks.clearFrom(fromHeight);
     }
     const tip = ctx.db.headers.tip();
-    const minH = ctx.db.headers.minHeight();
     const downloaded = ctx.db.filters.count();
-    // Same birthday-to-tip total as filters-download so TUI progress stays coherent.
-    const birthday = inspectWalletBirthday(ctx.db);
-    const filterFrom =
-      tip && minH !== null
-        ? birthday.status === "ok"
-          ? Math.max(birthday.height, minH)
-          : minH
-        : null;
+    const filterFrom = compactFilterFrom(ctx.db);
     const total =
       tip && filterFrom !== null
         ? Math.max(0, tip.height - filterFrom + 1)

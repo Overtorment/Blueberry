@@ -6,6 +6,7 @@ import {
   encodeTransaction,
   equalBytes,
   pairedByteDuplexes,
+  sha256d,
   transactionId,
   type ByteDuplex,
   type Transaction,
@@ -205,6 +206,77 @@ describe("broadcastTxV2", () => {
       }),
     ).rejects.toThrow(/rejected/i);
     await peer;
+    await client.close();
+    await server.close();
+  });
+
+  test("succeeds on MSG_WTX inv matching wtxid, not txid", async () => {
+    const [client, server] = pairedByteDuplexes();
+    const tx: Transaction = {
+      version: 2,
+      inputs: [
+        {
+          previousOutput: { hash: new Uint8Array(32), index: 0 },
+          scriptSig: new Uint8Array(),
+          sequence: 0xffffffff,
+          witness: [new Uint8Array(64).fill(1), new Uint8Array(33).fill(2)],
+        },
+      ],
+      outputs: [
+        {
+          value: 50_000_000n,
+          scriptPubKey: Uint8Array.of(0x00, 0x14, ...new Uint8Array(20)),
+        },
+      ],
+      lockTime: 0,
+    };
+    const txHex = Buffer.from(encodeTransaction(tx)).toString("hex");
+    const wtxid = sha256d(encodeTransaction(tx));
+    const txid = transactionId(tx);
+    expect(equalBytes(wtxid, txid)).toBe(false);
+
+    const protocolP = (async () => {
+      const protocol = await Protocol.connect(server, {
+        role: "responder",
+        network: Networks.mainnet,
+      });
+      let gotVersion = false;
+      let gotVerack = false;
+      while (!gotVersion || !gotVerack) {
+        const msg = await protocol.readMessage();
+        if (msg.command === "version") {
+          gotVersion = true;
+          await protocol.writeMessage({
+            command: "version",
+            payload: msg.payload,
+          });
+          await protocol.writeMessage({ command: "verack" });
+        } else if (msg.command === "verack") {
+          gotVerack = true;
+        }
+      }
+      for (;;) {
+        const msg = await protocol.readMessage();
+        if (msg.command !== "tx") continue;
+        await protocol.writeMessage({
+          command: "inv",
+          payload: {
+            inventory: [{ type: 5, hash: wtxid }],
+          },
+        });
+        return;
+      }
+    })();
+
+    const started = Date.now();
+    await broadcastTxV2(client, txHex, {
+      port: 8333,
+      name: APP_NAME,
+      version: APP_VERSION,
+      ackTimeoutMs: 2_000,
+    });
+    expect(Date.now() - started).toBeLessThan(500);
+    await protocolP;
     await client.close();
     await server.close();
   });

@@ -271,6 +271,7 @@ export function createChainHeadersModule(
 
   let stopped = true;
   let quiet = false;
+  let waitingForPeers = false;
   let unsubIdle: (() => void) | undefined;
   let unsubCatchup: (() => void) | undefined;
   let wake: (() => void) | undefined;
@@ -310,7 +311,9 @@ export function createChainHeadersModule(
       }
     }
     for (let i = 0; i < alive.length && picked.length < n; i++) {
-      push(alive[(peerIndex + i) % alive.length]!);
+      const peer = alive[(peerIndex + i) % alive.length]!;
+      if (pool?.isFull() && !pool.has(peer.host, peer.port)) continue;
+      push(peer);
     }
     return picked;
   }
@@ -507,14 +510,19 @@ export function createChainHeadersModule(
       const alive = allAlive.filter((p) => !dead.has(peerKey(p.host, p.port)));
 
       if (alive.length === 0) {
-        if (allAlive.length === 0) {
-          await waitForKick(pollIntervalMs);
-          continue;
+        waitingForPeers = true;
+        try {
+          if (allAlive.length === 0) {
+            await waitForKick(pollIntervalMs);
+          } else {
+            dead.clear();
+            skipped.clear();
+            sticky = null;
+            await waitForKick(250);
+          }
+        } finally {
+          waitingForPeers = false;
         }
-        dead.clear();
-        skipped.clear();
-        sticky = null;
-        await waitForKick(250);
         continue;
       }
 
@@ -622,7 +630,9 @@ export function createChainHeadersModule(
         kick();
       });
       unsubPeers = ctx.bus.on("peers:updated", () => {
-        if (quiet) return;
+        // At-tip idle must not refetch on every probe. Wake only the
+        // no-peer wait so coming back online resumes getheaders.
+        if (quiet && !waitingForPeers) return;
         kick();
       });
       loopPromise = detachLoop(ctx, "chain-headers", runLoop());
@@ -640,6 +650,8 @@ export function createChainHeadersModule(
       unsubCatchup = undefined;
       unsubPeers?.();
       unsubPeers = undefined;
+      waitingForPeers = false;
+      quiet = false;
       kick();
       await pool?.closeAll();
       await loopPromise;

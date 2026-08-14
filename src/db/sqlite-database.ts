@@ -639,7 +639,7 @@ export function createSqliteDatabase(path: string): Database {
       if (count > 0 && maxH - minH + 1 === count) {
         const ranges: Array<{ from: number; to: number }> = [];
         if (from < minH) pushChunks(ranges, from, Math.min(minH - 1, to));
-        if (maxH < to) pushChunks(ranges, maxH + 1, to);
+        if (maxH < to) pushChunks(ranges, Math.max(maxH + 1, from), to);
         return ranges;
       }
 
@@ -1098,6 +1098,16 @@ export function createSqliteDatabase(path: string): Database {
         .query("SELECT MIN(height) AS h FROM transactions")
         .get() as { h: bigint | number | null };
       return asIntOrNull(row.h);
+    },
+
+    get(txid) {
+      const row = raw
+        .query(
+          `SELECT txid, height, tx_index, block_hash_internal_hex, tx, net_delta_sats
+           FROM transactions WHERE txid = ?`,
+        )
+        .get(txid) as TxRow | null;
+      return row ? rowToStoredTx(row) : null;
     },
 
     setNetDelta(txid, netDeltaSats) {
