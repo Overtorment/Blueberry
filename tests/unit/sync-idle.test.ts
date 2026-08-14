@@ -47,6 +47,29 @@ function seedCaughtUpDb(db: ReturnType<typeof createSqliteDatabase>) {
   return tip;
 }
 
+function growTipWithoutFilter(
+  db: ReturnType<typeof createSqliteDatabase>,
+  tip: { height: number },
+) {
+  db.headers.append([
+    {
+      height: tip.height + 1,
+      hashInternalHex: "cd".repeat(32),
+      header: hexToBytes("00".repeat(80)),
+    },
+  ]);
+}
+
+function spyListAliveLimits(db: ReturnType<typeof createSqliteDatabase>) {
+  const limits: number[] = [];
+  const orig = db.peers.listAliveWithServices.bind(db.peers);
+  db.peers.listAliveWithServices = (bits, limit, options) => {
+    limits.push(limit);
+    return orig(bits, limit, options);
+  };
+  return limits;
+}
+
 /** Two consecutive idle evaluations are required before sync:idle. */
 function enterIdle(bus: ReturnType<typeof createMessageBus>) {
   bus.emit("headers:progress", {
@@ -207,4 +230,118 @@ describe("sync-idle", () => {
     await mod.stop();
     db.close();
   });
+
+  test("idle → catchup:filters when tip advances without cfilters", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const tip = seedCaughtUpDb(db);
+
+    const idles: number[] = [];
+    const catchups: string[] = [];
+    bus.on("sync:idle", (p) => idles.push(p.at));
+    bus.on("sync:catchup", (p) => catchups.push(p.reason));
+
+    const mod = createSyncIdleModule(
+      { bus, db },
+      { evalIntervalMs: 10_000, minAliveCompactFilters: 1 },
+    );
+    await mod.start();
+    enterIdle(bus);
+    await waitFor(() => idles.length >= 1);
+
+    growTipWithoutFilter(db, tip);
+    bus.emit("headers:progress", {
+      at: Date.now(),
+      downloaded: 1,
+      total: 1,
+      height: tip.height + 1,
+    });
+    await waitFor(() => catchups.includes("filters"));
+    expect(catchups).toEqual(["filters"]);
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("idle → catchup:peers when filter work meets a thin CF pool", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const tip = seedCaughtUpDb(db);
+
+    const idles: number[] = [];
+    const catchups: string[] = [];
+    bus.on("sync:idle", (p) => idles.push(p.at));
+    bus.on("sync:catchup", (p) => catchups.push(p.reason));
+
+    const mod = createSyncIdleModule(
+      { bus, db },
+      { evalIntervalMs: 10_000, minAliveCompactFilters: 2 },
+    );
+    await mod.start();
+    enterIdle(bus);
+    await waitFor(() => idles.length >= 1);
+
+    growTipWithoutFilter(db, tip);
+    bus.emit("headers:progress", {
+      at: Date.now(),
+      downloaded: 1,
+      total: 1,
+      height: tip.height + 1,
+    });
+    await waitFor(() => catchups.includes("peers"));
+    expect(catchups).toEqual(["peers"]);
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("catchup skips match and peer-churn snapshots", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    seedCaughtUpDb(db);
+
+    const mod = createSyncIdleModule(
+      { bus, db },
+      { evalIntervalMs: 10_000, minAliveCompactFilters: 1 },
+    );
+    await mod.start();
+
+    const limits = spyListAliveLimits(db);
+    for (let i = 0; i < 20; i++) {
+      bus.emit("filters:match", {
+        height: 1,
+        blockHashInternalHex: "aa".repeat(32),
+      });
+      bus.emit("peers:updated", { at: Date.now() });
+    }
+    expect(limits).toEqual([]);
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("catchup eval does not scan the compact-filter pool", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    seedCaughtUpDb(db);
+
+    const mod = createSyncIdleModule(
+      { bus, db },
+      { evalIntervalMs: 10_000, minAliveCompactFilters: 16 },
+    );
+    await mod.start();
+
+    const limits = spyListAliveLimits(db);
+    bus.emit("headers:progress", {
+      at: Date.now(),
+      downloaded: 1,
+      total: 1,
+      height: 1,
+    });
+    expect(limits.includes(16)).toBe(false);
+
+    await mod.stop();
+    db.close();
+  });
 });
+
