@@ -92,6 +92,41 @@ describe("parse-blocks gap growth", () => {
     db.close();
   });
 
+  test("gap growth aborts the current batch so later heights use the new watchlist", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const wide = deriveWatchWallet(MNEMONIC, 60);
+    const danger = wide.addresses.find((a) => !a.change && a.index === 25)!;
+    const next = wide.addresses.find((a) => !a.change && a.index === 45)!;
+
+    db.blocks.insert({
+      height: 3,
+      blockHashInternalHex: "dd".repeat(32),
+      block: blockBytesPaying(danger.scriptPubKey, 1000n),
+    });
+    db.blocks.insert({
+      height: 4,
+      blockHashInternalHex: "cc".repeat(32),
+      block: blockBytesPaying(next.scriptPubKey, 2000n),
+    });
+
+    const watch = createWallet(db, { secret: MNEMONIC, addressGap: 40 });
+    const mod = createParseBlocksModule(
+      { bus, db },
+      { wallet: watch, idleDelayMs: 50, batchSize: 8, blockGapMs: 0 },
+    );
+    await mod.start();
+    bus.emit("sync:idle", { at: Date.now() });
+    await waitFor(() => {
+      const used = usedWatchIndexes(db.transactions.list(), watch.snapshot());
+      return used.external.includes(45);
+    });
+    expect(db.transactions.count()).toBe(2);
+    expect(loadWatchGaps(db).external).toBeGreaterThanOrEqual(90);
+    await mod.stop();
+    db.close();
+  });
+
   test("gap growth re-parses already-downloaded blocks for newly watched indexes", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
