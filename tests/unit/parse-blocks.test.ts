@@ -8,6 +8,7 @@ import { config } from "../../src/config.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 import { createParseBlocksModule } from "../../src/modules/parse-blocks.ts";
 import { createWallet } from "../../src/wallet/wallet.ts";
+import { openTempFileLog } from "./file-log-harness.ts";
 
 const MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -68,6 +69,7 @@ describe("parse-blocks", () => {
       { bus, db },
       { wallet, idleDelayMs: 50, blockGapMs: 0 },
     );
+    const file = openTempFileLog();
     await mod.start();
     bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => db.parsedBlocks.has(50) && db.transactions.count() === 1);
@@ -76,6 +78,12 @@ describe("parse-blocks", () => {
 
     // second start path: already parsed — still emits wallet:txs, no double insert
     await mod.stop();
+    const text = file.read();
+    file.close();
+    expect(text).toContain("[parse-blocks] start");
+    expect(text).toContain("[parse-blocks] allowed");
+    expect(text).toContain("[parse-blocks] batch n=1 from=50 to=50");
+    expect(text).toContain("[parse-blocks] stop");
     const before = events.length;
     const wallet2 = createWallet(db, { secret: MNEMONIC, addressGap: 4 });
     const mod2 = createParseBlocksModule(
@@ -188,6 +196,7 @@ describe("parse-blocks", () => {
         blockGapMs: 0,
       },
     );
+    const file = openTempFileLog();
     await mod.start();
     bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => db.parsedBlocks.has(11));
@@ -197,6 +206,8 @@ describe("parse-blocks", () => {
     expect(db.transactions.count()).toBe(1);
     expect(db.transactions.list()[0]?.netDeltaSats).toBe(100);
     await mod.stop();
+    expect(file.read()).toContain("[parse-blocks] decode height=10");
+    file.close();
     db.close();
   });
 
@@ -267,12 +278,14 @@ describe("parse-blocks", () => {
         blockGapMs: 30,
       },
     );
+    const file = openTempFileLog();
     await mod.start();
     bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => db.parsedBlocks.has(1));
     await new Promise((r) => setTimeout(r, 120));
     expect(db.parsedBlocks.has(2)).toBe(false);
     expect(db.parsedBlocks.has(3)).toBe(false);
+    expect(file.read()).toContain("[parse-blocks] paused");
 
     bus.emit("sync:idle", { at: Date.now() });
     await waitFor(
@@ -283,6 +296,7 @@ describe("parse-blocks", () => {
     );
 
     await mod.stop();
+    file.close();
     db.close();
   });
 
@@ -390,6 +404,7 @@ describe("parse-blocks", () => {
     });
 
     let batches = 0;
+    const file = openTempFileLog();
     const mod = createParseBlocksModule(
       { bus, db },
       {
@@ -406,6 +421,8 @@ describe("parse-blocks", () => {
     bus.emit("sync:idle", { at: Date.now() });
     await waitFor(() => db.parsedBlocks.has(7) && db.transactions.count() === 1);
     await mod.stop();
+    expect(file.read()).toContain("[parse-blocks] batch: boom");
+    file.close();
     db.close();
   });
 

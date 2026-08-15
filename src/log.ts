@@ -4,6 +4,11 @@ import { formatError } from "./net/format-error.ts";
 
 let logPath: string | null = null;
 
+/** True only when argv contains the exact token `--log`. */
+export function shouldEnableFileLog(argv: readonly string[]): boolean {
+  return argv.includes("--log");
+}
+
 /** Enable append-only logging to `filePath` (created if missing). */
 export function initFileLog(filePath: string): void {
   mkdirSync(dirname(filePath), { recursive: true });

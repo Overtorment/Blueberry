@@ -6,6 +6,7 @@ import { createFiltersMatchingModule } from "../../src/modules/filters-matching.
 import { deriveWatchWallet } from "../../src/wallet/derive.ts";
 import { createWallet } from "../../src/wallet/wallet.ts";
 import { saveWatchGaps } from "../../src/wallet/watch-gaps.ts";
+import { openTempFileLog } from "./file-log-harness.ts";
 
 const ABANDON_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -162,6 +163,7 @@ describe("filters-matching", () => {
         yieldFn: async () => {},
       },
     );
+    const file = openTempFileLog();
     await mod.start();
     expect(events[0]).toEqual({ scanned: 1, total: 3 });
     await waitFor(
@@ -170,6 +172,12 @@ describe("filters-matching", () => {
     expect(events.map((e) => e.scanned)).toEqual([1, 2, 3]);
     expect(events.every((e) => e.total === 3)).toBe(true);
     await mod.stop();
+    const text = file.read();
+    file.close();
+    expect(text).toContain("[filters-matching] start");
+    expect(text).toContain("[filters-matching] scan start scanned=1 total=3");
+    expect(text).toContain("[filters-matching] scan done");
+    expect(text).toContain("[filters-matching] stop");
     db.close();
   });
 
@@ -284,6 +292,13 @@ describe("filters-matching", () => {
       (a) => !a.change && a.index === 5,
     )!;
     const hash = "66".repeat(32);
+    db.headers.append([
+      {
+        height: 600,
+        hashInternalHex: hash,
+        header: new Uint8Array(80),
+      },
+    ]);
     appendFilter(db, 600, hash, [index5External.scriptPubKey]);
 
     const hits: Array<{ height: number; blockHashInternalHex: string }> = [];
@@ -293,6 +308,7 @@ describe("filters-matching", () => {
       { bus, db },
       { wallet, batchGapMs: 0, yieldFn: async () => {} },
     );
+    const file = openTempFileLog();
     await mod.start();
     await waitFor(() => !needsMatch(db, 600));
     expect(hits).toEqual([]);
@@ -305,6 +321,15 @@ describe("filters-matching", () => {
     await waitFor(() => hits.some((h) => h.height === 600));
     expect(hits[0]).toEqual({ height: 600, blockHashInternalHex: hash });
     expect(db.matchedBlocks.count()).toBe(1);
+    const text = file.read();
+    expect(text).toContain("[filters-matching] rematch from=600");
+    const afterRematch = text.slice(
+      text.indexOf("[filters-matching] rematch from=600"),
+    );
+    expect(afterRematch).toContain(
+      "[filters-matching] scan start scanned=0 total=1",
+    );
+    file.close();
     await mod.stop();
     db.close();
   });
@@ -416,6 +441,66 @@ describe("filters-matching", () => {
     // (~60+ yields). Abort + rematch should hit with far fewer.
     expect(yields).toBeLessThan(45);
     await mod.stop();
+    db.close();
+  });
+
+  test("scan done total includes filters that arrived mid-scan", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const wallet = createWallet(db, { secret: ABANDON_MNEMONIC, addressGap: 4 });
+    const junk = new Uint8Array([0x00, 0x14, ...new Uint8Array(20).fill(0xab)]);
+    appendFilter(db, 1, "01".repeat(32), [junk]);
+    appendFilter(db, 2, "02".repeat(32), [junk]);
+
+    let injected = false;
+    const mod = createFiltersMatchingModule(
+      { bus, db },
+      {
+        wallet,
+        batchSize: 1,
+        batchGapMs: 0,
+        yieldFn: async () => {
+          if (injected) return;
+          injected = true;
+          appendFilter(db, 3, "03".repeat(32), [junk]);
+        },
+      },
+    );
+    const file = openTempFileLog();
+    await mod.start();
+    await waitFor(() => db.filters.countScanned() === 3);
+    await mod.stop();
+    const text = file.read();
+    file.close();
+
+    expect(text).toContain("[filters-matching] scan start scanned=0 total=2");
+    expect(text).toContain("[filters-matching] scan done scanned=3 total=3");
+    expect(text).not.toMatch(/scan done scanned=\d+ total=2/);
+    db.close();
+  });
+
+  test("idle loop with no pending work does not log scan start or scan done", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const wallet = createWallet(db, { secret: ABANDON_MNEMONIC, addressGap: 4 });
+    const junk = new Uint8Array([0x00, 0x14, ...new Uint8Array(20).fill(0xab)]);
+    appendFilter(db, 1, "01".repeat(32), [junk]);
+    db.filters.markScanned([1]);
+
+    const mod = createFiltersMatchingModule(
+      { bus, db },
+      { wallet, batchGapMs: 0, yieldFn: async () => {} },
+    );
+    const file = openTempFileLog();
+    await mod.start();
+    await new Promise((r) => setTimeout(r, 120));
+    const text = file.read();
+    file.close();
+    await mod.stop();
+
+    expect(text).toContain("[filters-matching] start");
+    expect(text).not.toMatch(/\[filters-matching\] scan start/);
+    expect(text).not.toMatch(/\[filters-matching\] scan done/);
     db.close();
   });
 

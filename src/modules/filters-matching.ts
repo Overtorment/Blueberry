@@ -6,6 +6,7 @@ import {
 import { compactFilterFrom } from "../wallet/birthday.ts";
 import type { WatchGaps } from "../wallet/derive.ts";
 import type { Wallet } from "../wallet/wallet.ts";
+import { log, logError } from "../log.ts";
 import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
@@ -99,16 +100,30 @@ export function createFiltersMatchingModule(
           const fromHeight =
             compactFilterFrom(ctx.db) ?? ctx.db.transactions.minHeight();
           if (fromHeight !== null) {
+            log(
+              "filters-matching",
+              `rematch from=${fromHeight} external=${gaps.external} internal=${gaps.internal}`,
+            );
             ctx.db.filters.markUnscannedFrom(fromHeight);
           }
         }
         loadedGaps = gaps;
         const scannedWith = gaps;
-        await scanFiltersForMatches(
+        let matches = 0;
+        const scanTotal = ctx.db.filters.count();
+        const scanScanned = ctx.db.filters.countScanned();
+        if (scanTotal !== scanScanned) {
+          log(
+            "filters-matching",
+            `scan start scanned=${scanScanned} total=${scanTotal} external=${gaps.external} internal=${gaps.internal}`,
+          );
+        }
+        const advanced = await scanFiltersForMatches(
           ctx.db,
           wallet.scripts(),
           {
             onMatch: (m) => {
+              matches++;
               ctx.bus.emit("filters:match", m);
             },
             onProgress: (p) => {
@@ -134,6 +149,12 @@ export function createFiltersMatchingModule(
             },
           },
         );
+        if (advanced > 0) {
+          log(
+            "filters-matching",
+            `scan done scanned=${ctx.db.filters.countScanned()} total=${ctx.db.filters.count()} matches=${matches}`,
+          );
+        }
         // Peek only — sync here would advance loadedGaps before rematch.
         const gapsNow = wallet.peekGaps();
         if (
@@ -143,6 +164,7 @@ export function createFiltersMatchingModule(
           needsRun = true;
         }
       } catch (err) {
+        logError("filters-matching", "scan", err);
         ctx.bus.emit("module:status", {
           module: "filters-matching",
           status: "error",
@@ -165,6 +187,7 @@ export function createFiltersMatchingModule(
     async start() {
       if (!stopped) return;
       stopped = false;
+      log("filters-matching", "start");
       ctx.bus.emit("module:status", {
         module: "filters-matching",
         status: "starting",
@@ -204,6 +227,7 @@ export function createFiltersMatchingModule(
       loopPromise = undefined;
       busy = false;
       needsRun = false;
+      log("filters-matching", "stop");
       ctx.bus.emit("module:status", {
         module: "filters-matching",
         status: "stopped",

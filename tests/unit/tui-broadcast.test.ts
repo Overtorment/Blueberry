@@ -2,12 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { createMessageBus } from "../../src/bus/message-bus.ts";
 import {
   broadcastJobInFlight,
+  cancelBroadcast,
   inFlightBroadcastEscape,
   previewOwnsBroadcastJob,
   previewShowsBroadcastUi,
   setActiveBroadcastBus,
   startUiBroadcast,
 } from "../../src/tui/broadcast-actions.ts";
+import { openTempFileLog } from "./file-log-harness.ts";
 import { createBroadcastStore } from "../../src/tui/broadcast-store.ts";
 
 describe("startUiBroadcast", () => {
@@ -19,7 +21,12 @@ describe("startUiBroadcast", () => {
       store.applyDone({ id, ok: false, error: "invalid transaction hex" });
     });
 
+    const file = openTempFileLog();
     startUiBroadcast(store, "deadbeef");
+    const text = file.read();
+    file.close();
+    expect(text).toMatch(/\[tui\] broadcast start id=[0-9a-f-]{36}/);
+    expect(text).not.toContain("deadbeef");
 
     expect(store.get().phase).toBe("error");
     expect(store.get().error).toBe("invalid transaction hex");
@@ -129,6 +136,16 @@ describe("startUiBroadcast", () => {
     expect(ids).toHaveLength(1);
     expect(store.get().phase).toBe("waiting-peers");
     expect(store.get().id).toBe(ids[0]!);
+  });
+
+  test("logs broadcast cancel id", () => {
+    const file = openTempFileLog();
+    const bus = createMessageBus();
+    setActiveBroadcastBus(bus);
+    cancelBroadcast("job-1");
+    const text = file.read();
+    file.close();
+    expect(text).toContain("[tui] broadcast cancel id=job-1");
   });
 });
 

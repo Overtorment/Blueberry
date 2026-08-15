@@ -4,6 +4,7 @@ import { extractWatchTxs } from "../parse/extract.ts";
 import { usedWatchIndexes } from "../parse/used-indexes.ts";
 import { compactFilterFrom } from "../wallet/birthday.ts";
 import type { Wallet } from "../wallet/wallet.ts";
+import { log, logError } from "../log.ts";
 import {
   growWatchGapsIfNeeded,
   loadWatchGaps,
@@ -157,6 +158,11 @@ export function createParseBlocksModule(
       return;
     }
 
+    log(
+      "parse-blocks",
+      `batch n=${blocks.length} from=${blocks[0]!.height} to=${blocks[blocks.length - 1]!.height}`,
+    );
+
     const scripts = wallet.scripts();
     const utxos = buildUtxoMap(ctx.db.transactions.list(), scripts);
     let sawWatchTx = false;
@@ -188,6 +194,7 @@ export function createParseBlocksModule(
           ctx.bus.emit("wallet:txs", { at: now() });
         }
       } catch (err) {
+        logError("parse-blocks", `decode height=${block.height}`, err);
         failedHeights.add(block.height);
         ctx.bus.emit("module:status", {
           module: "parse-blocks",
@@ -223,6 +230,7 @@ export function createParseBlocksModule(
       try {
         await parseBatch();
       } catch (err) {
+        logError("parse-blocks", "batch", err);
         ctx.bus.emit("module:status", {
           module: "parse-blocks",
           status: "error",
@@ -250,6 +258,7 @@ export function createParseBlocksModule(
       if (!stopped) return;
       stopped = false;
       failedHeights.clear();
+      log("parse-blocks", "start");
       ctx.bus.emit("module:status", {
         module: "parse-blocks",
         status: "starting",
@@ -267,6 +276,7 @@ export function createParseBlocksModule(
       unsubIdle = ctx.bus.on("sync:idle", () => {
         if (stopped) return;
         allowed = true;
+        log("parse-blocks", "allowed");
         if (busy) {
           needsRun = true;
           return;
@@ -275,6 +285,7 @@ export function createParseBlocksModule(
       });
       unsubCatchup = ctx.bus.on("sync:catchup", () => {
         allowed = false;
+        log("parse-blocks", "paused");
       });
 
       ctx.bus.emit("module:status", {
@@ -307,6 +318,7 @@ export function createParseBlocksModule(
       loopPromise = undefined;
       busy = false;
       needsRun = false;
+      log("parse-blocks", "stop");
       ctx.bus.emit("module:status", {
         module: "parse-blocks",
         status: "stopped",

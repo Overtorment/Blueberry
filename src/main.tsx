@@ -8,7 +8,7 @@ import { consensusForYear } from "./checkpoint.ts";
 import { createMessageBus } from "./bus/message-bus.ts";
 import { createSqliteDatabase } from "./db/sqlite-database.ts";
 import type { Database } from "./db/types.ts";
-import { initFileLog, log, logError } from "./log.ts";
+import { initFileLog, log, logError, shouldEnableFileLog } from "./log.ts";
 import { createBlocksDownloadModule } from "./modules/blocks-download.ts";
 import { createChainHeadersModule } from "./modules/chain-headers.ts";
 import { createFiltersDownloadModule } from "./modules/filters-download.ts";
@@ -60,7 +60,9 @@ import {
 import { createWallet } from "./wallet/wallet.ts";
 
 mkdirSync("./blueberry.data", { recursive: true });
-initFileLog("./blueberry.data/blueberry.log");
+if (shouldEnableFileLog(process.argv)) {
+  initFileLog("./blueberry.data/blueberry.log");
+}
 log("main", "boot");
 
 installFatalUnhandledRejection({
@@ -77,6 +79,7 @@ try {
   );
 
   if (gate.action === "exit-invalid") {
+    log("main", `exit-invalid ${gate.detail}`);
     console.error(`wallet_secret is present but invalid: ${gate.detail}`);
     console.error(
       "Fix or delete the wallet_secret key in the database, then restart.",
@@ -85,6 +88,7 @@ try {
   }
 
   if (gate.action === "onboard") {
+    log("main", "onboarding");
     const renderer = await createCliRenderer({
       exitOnCtrlC: false,
       exitSignals: [],
@@ -98,6 +102,7 @@ try {
         /* ignore */
       }
       if (err !== undefined) console.error(err);
+      log("main", `onboarding quit code=${code}`);
       process.reallyExit(code);
     }
 
@@ -161,6 +166,7 @@ try {
     process.once("SIGINT", () => quitOnboarding(0));
     process.once("SIGTERM", () => quitOnboarding(0));
   } else {
+    log("main", "startApp");
     await startApp(db);
   }
 } catch (err) {
@@ -171,6 +177,7 @@ try {
 
 async function startApp(db: Database): Promise<void> {
   const year = loadSyncFromYear(db);
+  log("main", `startApp year=${year}`);
   const bus = createMessageBus();
   const net = createNodePlatformNet();
   const ctx = { bus, db };
@@ -233,6 +240,7 @@ async function startApp(db: Database): Promise<void> {
     try {
       await mod.start();
     } catch (err) {
+      logError("main", `module start failed name=${mod.name}`, err);
       bus.emit("module:status", {
         module: mod.name,
         status: "error",
@@ -271,6 +279,7 @@ async function startApp(db: Database): Promise<void> {
     shuttingDown = true;
     // Committed writes are already in the WAL. Skip db.close() (WAL checkpoint),
     // skip renderer.destroy(), skip exit/beforeExit hooks — hard-stop now.
+    log("main", "shutdown");
     process.reallyExit(0);
   }
 

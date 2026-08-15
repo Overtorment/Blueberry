@@ -1,3 +1,5 @@
+import { log } from "../log.ts";
+
 export type UiRoute = "txs" | "receive" | "send";
 
 export type UiRouteStore = {
@@ -14,6 +16,7 @@ export function createUiRouteStore(): UiRouteStore {
   function set(next: UiRoute): void {
     if (route === next) return;
     route = next;
+    log("tui", `route ${next}`);
     for (const listener of [...listeners]) listener();
   }
 

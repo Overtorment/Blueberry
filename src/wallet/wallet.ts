@@ -2,6 +2,7 @@ import {
   deriveWatchWallet,
   type WatchGaps,
 } from "./derive.ts";
+import { log } from "../log.ts";
 import { loadWalletSecret, parseWalletSecret } from "./secret.ts";
 import type { WatchWallet } from "./types.ts";
 import { loadWatchGaps, saveWatchGaps } from "./watch-gaps.ts";
@@ -50,6 +51,10 @@ export function createWallet(
 
   let currentGaps = loadWatchGaps(db);
   let current = deriveWatchWallet(secret, currentGaps);
+  log(
+    "wallet",
+    `ready kind=${current.kind} external=${currentGaps.external} internal=${currentGaps.internal}`,
+  );
 
   const syncFromDb = () => {
     const gaps = loadWatchGaps(db);
@@ -59,6 +64,10 @@ export function createWallet(
     if (grew) {
       currentGaps = gaps;
       current = deriveWatchWallet(secret, currentGaps);
+      log(
+        "wallet",
+        `gaps grew external=${gaps.external} internal=${gaps.internal}`,
+      );
     }
     return { grew };
   };

@@ -2,6 +2,7 @@ import { NODE_COMPACT_FILTERS } from "bip157";
 import { evaluateSyncState } from "../sync/evaluate.ts";
 import type { SyncMode, SyncSnapshot } from "../sync/types.ts";
 import { compactFilterFrom, inspectWalletBirthday } from "../wallet/birthday.ts";
+import { log } from "../log.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
 /** Bitcoin NODE_NETWORK — peer can serve historical blocks. */
@@ -84,6 +85,7 @@ export function createSyncIdleModule(
       idleStreak++;
       if (mode === "catchup" && idleStreak >= 2) {
         mode = "idle";
+        log("sync-idle", "idle");
         ctx.bus.emit("sync:idle", { at: now() });
         ctx.bus.emit("module:status", {
           module: "sync-idle",
@@ -98,6 +100,7 @@ export function createSyncIdleModule(
 
     if (mode === "idle") {
       mode = "catchup";
+      log("sync-idle", `catchup reason=${evalResult.reason}`);
       ctx.bus.emit("sync:catchup", {
         at: now(),
         reason: evalResult.reason,
@@ -131,6 +134,7 @@ export function createSyncIdleModule(
         status: "starting",
       });
       stopped = false;
+      log("sync-idle", "start");
       mode = "catchup";
       idleStreak = 0;
       const tip = ctx.db.headers.tip();
@@ -180,6 +184,7 @@ export function createSyncIdleModule(
       }
       for (const unsub of unsubs) unsub();
       unsubs.length = 0;
+      log("sync-idle", "stop");
       ctx.bus.emit("module:status", {
         module: "sync-idle",
         status: "stopped",

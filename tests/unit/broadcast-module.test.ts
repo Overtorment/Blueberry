@@ -11,6 +11,7 @@ import {
 } from "bip324";
 import { createMessageBus } from "../../src/bus/message-bus.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
+import { closeFileLog } from "../../src/log.ts";
 import { createBroadcastModule } from "../../src/modules/broadcast/index.ts";
 
 function sampleTx(): Transaction {
@@ -349,6 +350,37 @@ describe("broadcast module", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/invalid transaction hex/i);
     expect(dialed).toBe(0);
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("failed broadcast error hints to re-run with --log when file log is closed", async () => {
+    closeFileLog();
+    const db = createSqliteDatabase(":memory:");
+    upsertAlive(db, "1.1.1.1");
+    const bus = createMessageBus();
+    const txHex = Buffer.from(encodeTransaction(sampleTx())).toString("hex");
+
+    const mod = createBroadcastModule(
+      { bus, db },
+      {
+        maxAttempts: 1,
+        connect: async () => {
+          throw new Error("dial failed");
+        },
+      },
+    );
+    await mod.start();
+
+    const done = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      bus.on("broadcast:done", (p) => resolve(p));
+    });
+    bus.emit("broadcast:request", { id: "8", txHex });
+
+    const result = await done;
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/re-run with --log/);
 
     await mod.stop();
     db.close();
