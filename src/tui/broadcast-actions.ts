@@ -1,4 +1,5 @@
 import type { MessageBus } from "../bus/types.ts";
+import { log } from "../log.ts";
 import type { BroadcastStore } from "./broadcast-store.ts";
 
 let bus: MessageBus | null = null;
@@ -31,11 +32,13 @@ export function startUiBroadcast(store: BroadcastStore, txHex: string): void {
   }
   const id = crypto.randomUUID();
   store.begin(id, txHex);
+  log("tui", `broadcast start id=${id}`);
   requestBroadcast(txHex, id);
 }
 
 export function cancelBroadcast(id: string): void {
   if (!bus) throw new Error("broadcast bus not initialized");
+  log("tui", `broadcast cancel id=${id}`);
   bus.emit("broadcast:cancel", { id });
 }
 

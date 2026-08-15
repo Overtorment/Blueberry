@@ -1,3 +1,5 @@
+import { log } from "../log.ts";
+
 export const WALLET_BIRTHDAY_HEIGHT_KEY = "wallet_birthday_height";
 export const WALLET_BIRTHDAY_PENDING = "pending";
 
@@ -15,6 +17,7 @@ export type WalletBirthdayInspection =
 
 export function markWalletBirthdayPending(db: Kv): void {
   db.keyValue.set(WALLET_BIRTHDAY_HEIGHT_KEY, WALLET_BIRTHDAY_PENDING);
+  log("wallet", "birthday pending");
 }
 
 export function inspectWalletBirthday(db: Kv): WalletBirthdayInspection {
@@ -45,5 +48,6 @@ export function maybeFreezeWalletBirthday(db: Kv, height: number): boolean {
   if (!Number.isInteger(height) || height < 0) return false;
   if (inspectWalletBirthday(db).status !== "pending") return false;
   db.keyValue.set(WALLET_BIRTHDAY_HEIGHT_KEY, String(height));
+  log("wallet", `birthday height=${height}`);
   return true;
 }

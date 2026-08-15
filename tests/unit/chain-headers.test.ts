@@ -21,6 +21,7 @@ import {
   inspectWalletBirthday,
   markWalletBirthdayPending,
 } from "../../src/wallet/birthday.ts";
+import { openTempFileLog } from "./file-log-harness.ts";
 import { stubPlatformNet } from "./stub-platform-net.ts";
 
 const EASY_BITS = 0x207fffff;
@@ -227,6 +228,7 @@ describe("chain-headers", () => {
     );
 
     let calls = 0;
+    const file = openTempFileLog();
     const mod = createChainHeadersModule(
       { bus, db },
       {
@@ -277,6 +279,15 @@ describe("chain-headers", () => {
     });
     expect(events.at(-1)).toEqual({ downloaded: 1, total: 1 });
     await mod.stop();
+    const text = file.read();
+    file.close();
+    expect(text).toContain("[chain-headers] start");
+    expect(text).toContain("[chain-headers] waiting for peers");
+    expect(text).toContain(
+      `[chain-headers] append after=${CHECKPOINT_HEIGHT} tip=${CHECKPOINT_HEIGHT + 1} n=1`,
+    );
+    expect(text).toContain(`[chain-headers] at tip height=${CHECKPOINT_HEIGHT + 1}`);
+    expect(text).toContain("[chain-headers] stop");
     db.close();
   });
 
@@ -298,6 +309,7 @@ describe("chain-headers", () => {
     bus.on("peers:updated", () => {
       peerUpdates++;
     });
+    const file = openTempFileLog();
     const mod = createChainHeadersModule(
       { bus, db },
       {
@@ -317,6 +329,47 @@ describe("chain-headers", () => {
     expect(new Set(tried)).toEqual(new Set(["1.1.1.1", "2.2.2.2"]));
     expect(db.peers.listAlive()).toHaveLength(0);
     await mod.stop();
+    const text = file.read();
+    file.close();
+    expect(text).toContain("[chain-headers] peer fail 1.1.1.1:8333 error=dead");
+    expect(text).toContain("[chain-headers] peer fail 2.2.2.2:8333 error=dead");
+    db.close();
+  });
+
+  test("logs peer fail when a header batch does not link", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.headers.ensureCheckpoint(checkpointDbRecord());
+    upsertPeer(db, "3.3.3.3");
+    const linked = decodeBlockHeader(
+      hexToBytes(
+        "000000208fdfeffd2c3a3a235a847805dbd1dc5adb9cd48519532a000000000000000000105b6f8cba2f1258ea4c1e41f72e843c770c3acfede6f02df3108c6fba7b88bfca4f2a5ca5183217d6a930c9",
+      ),
+    );
+    const orphan = {
+      ...linked,
+      previousBlockHash: new Uint8Array(32).fill(0xab),
+    };
+    const file = openTempFileLog();
+    const mod = createChainHeadersModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        pollIntervalMs: 10_000,
+        fetchBatch: async () => ({
+          ok: true as const,
+          startHeight: CHECKPOINT_HEIGHT + 1,
+          headers: [orphan],
+        }),
+      },
+    );
+    await mod.start();
+    await waitFor(() => db.peers.listAlive().length === 0);
+    await mod.stop();
+    const text = file.read();
+    file.close();
+    expect(text).toContain("[chain-headers] peer fail 3.3.3.3:8333");
+    expect(text).toContain("does not link to known chain");
     db.close();
   });
 
@@ -429,6 +482,7 @@ describe("chain-headers", () => {
     });
 
     let calls = 0;
+    const file = openTempFileLog();
     const mod = createChainHeadersModule(
       { bus, db },
       {
@@ -469,6 +523,8 @@ describe("chain-headers", () => {
     expect(wakes).toContain("wallet:txs");
     expect(wakes).toContain("blocks:progress");
     await mod.stop();
+    expect(file.read()).toContain("[chain-headers] replace after=");
+    file.close();
     db.close();
   });
 

@@ -14,6 +14,7 @@ import {
 } from "bitcoin-headers";
 import { BLUEBERRY_HEADER_CONSENSUS } from "../checkpoint.ts";
 import { config } from "../config.ts";
+import { log, logError } from "../log.ts";
 import { maybeFreezeWalletBirthday } from "../wallet/birthday.ts";
 import type {
   HeaderRecord as DbHeaderRecord,
@@ -111,19 +112,24 @@ function persistBranch(
   }));
   if (mode === "append") {
     ctx.db.headers.append(writes);
-    return;
+  } else {
+    ctx.db.transaction(() => {
+      ctx.db.rewindAfter(ancestorHeight);
+      ctx.db.headers.replaceAfter(ancestorHeight, writes);
+    });
+    const at = Date.now();
+    ctx.bus.emit("wallet:txs", { at });
+    ctx.bus.emit("blocks:progress", {
+      at,
+      downloaded: ctx.db.blocks.count(),
+      matched: ctx.db.matchedBlocks.count(),
+    });
   }
-  ctx.db.transaction(() => {
-    ctx.db.rewindAfter(ancestorHeight);
-    ctx.db.headers.replaceAfter(ancestorHeight, writes);
-  });
-  const at = Date.now();
-  ctx.bus.emit("wallet:txs", { at });
-  ctx.bus.emit("blocks:progress", {
-    at,
-    downloaded: ctx.db.blocks.count(),
-    matched: ctx.db.matchedBlocks.count(),
-  });
+  const tipHeight = writes[writes.length - 1]!.height;
+  log(
+    "chain-headers",
+    `${mode} after=${ancestorHeight} tip=${tipHeight} n=${writes.length}`,
+  );
 }
 
 /** Extend/replace an in-memory validated chain after a successful branch apply. */
@@ -402,12 +408,21 @@ export function createChainHeadersModule(
               onSettledPeer();
               return;
             }
+            log(
+              "chain-headers",
+              `peer fail ${peerKey(peer.host, peer.port)} error=${result.error}`,
+            );
             hardFails++;
             failed.push(peer);
             onSettledPeer();
           },
-          () => {
+          (err) => {
             if (settled) return;
+            logError(
+              "chain-headers",
+              `peer fail ${peerKey(peer.host, peer.port)}`,
+              err,
+            );
             hardFails++;
             failed.push(peer);
             onSettledPeer();
@@ -494,6 +509,8 @@ export function createChainHeadersModule(
   async function runLoop(): Promise<void> {
     const dead = new Set<string>();
     const skipped = new Set<string>();
+    let loggedWaiting = false;
+    let loggedTipHeight = -1;
 
     function markPeerHardFailed(peer: PeerRef): void {
       dead.add(peerKey(peer.host, peer.port));
@@ -510,6 +527,10 @@ export function createChainHeadersModule(
       const alive = allAlive.filter((p) => !dead.has(peerKey(p.host, p.port)));
 
       if (alive.length === 0) {
+        if (!loggedWaiting) {
+          loggedWaiting = true;
+          log("chain-headers", "waiting for peers");
+        }
         waitingForPeers = true;
         try {
           if (allAlive.length === 0) {
@@ -525,6 +546,8 @@ export function createChainHeadersModule(
         }
         continue;
       }
+
+      loggedWaiting = false;
 
       const raced = pickRacePeers(alive, skipped);
       if (raced.length === 0) {
@@ -572,6 +595,11 @@ export function createChainHeadersModule(
         maxPeerStartHeight = ensureChain().tipHeight;
         emitProgress();
         tryFreezeBirthday();
+        const tipHeight = ensureChain().tipHeight;
+        if (loggedTipHeight !== tipHeight) {
+          loggedTipHeight = tipHeight;
+          log("chain-headers", `at tip height=${tipHeight}`);
+        }
         await waitForKick(pollIntervalMs);
         continue;
       }
@@ -603,6 +631,11 @@ export function createChainHeadersModule(
         sticky = null;
       } catch (err) {
         if (!(err instanceof HeaderConsensusError)) throw err;
+        logError(
+          "chain-headers",
+          `peer fail ${peerKey(peer.host, peer.port)}`,
+          err,
+        );
         markPeerHardFailed(peer);
         await waitForKick(500);
       }
@@ -617,6 +650,7 @@ export function createChainHeadersModule(
         module: "chain-headers",
         status: "starting",
       });
+      log("chain-headers", "start");
       stopped = false;
       ctx.db.headers.ensureCheckpoint(checkpointSeedFromConsensus(consensus));
       // Persisted headers are already validated — never re-validate the DB.
@@ -658,6 +692,7 @@ export function createChainHeadersModule(
       await pool?.closeAll();
       loopPromise = undefined;
       sticky = null;
+      log("chain-headers", "stop");
       ctx.bus.emit("module:status", {
         module: "chain-headers",
         status: "stopped",

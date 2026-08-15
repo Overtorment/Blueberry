@@ -265,7 +265,9 @@ export function createBroadcastModule(
             ? `broadcast failed after ${attemptsUsed} attempts: ${summary}`
             : `broadcast failed: ${summary}`;
         log("broadcast", error);
-        const logHint = getLogPath() ? ` (see ${getLogPath()})` : "";
+        const logHint = getLogPath()
+          ? ` (see ${getLogPath()})`
+          : " (re-run with --log)";
         ctx.bus.emit("broadcast:done", {
           id,
           ok: false,
@@ -280,7 +282,9 @@ export function createBroadcastModule(
       const message = formatError(err);
       logError("broadcast", "aborted/error", err);
       emitProgress("error", { detail: message });
-      const logHint = getLogPath() ? ` (see ${getLogPath()})` : "";
+      const logHint = getLogPath()
+        ? ` (see ${getLogPath()})`
+        : " (re-run with --log)";
       ctx.bus.emit("broadcast:done", {
         id,
         ok: false,

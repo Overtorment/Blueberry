@@ -22,6 +22,7 @@ import {
 } from "../../src/wallet/secret.ts";
 import { createWallet } from "../../src/wallet/wallet.ts";
 import { loadWatchGaps, saveWatchGaps } from "../../src/wallet/watch-gaps.ts";
+import { openTempFileLog } from "./file-log-harness.ts";
 
 const ABANDON =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -231,8 +232,13 @@ describe("createWallet", () => {
   });
 
   test("syncFromDb re-derives on gap growth; no-op when unchanged", () => {
+    const file = openTempFileLog();
     const db = createSqliteDatabase(":memory:");
     const wallet = createWallet(db, { secret: ABANDON, addressGap: 2 });
+    expect(file.read()).toContain(
+      "[wallet] ready kind=bip84 external=2 internal=2",
+    );
+    expect(file.read()).not.toContain(ABANDON);
     expect(wallet.scripts()).toHaveLength(4);
     const scripts1 = wallet.scripts();
     expect(wallet.syncFromDb().grew).toBe(false);
@@ -242,9 +248,12 @@ describe("createWallet", () => {
 
     saveWatchGaps(db, { external: 5, internal: 2 });
     expect(wallet.syncFromDb().grew).toBe(true);
+    expect(file.read()).toContain("[wallet] gaps grew external=5 internal=2");
+    expect(file.read()).not.toContain(ABANDON);
     expect(wallet.gaps()).toEqual({ external: 5, internal: 2 });
     expect(wallet.scripts()).toHaveLength(7);
     expect(wallet.snapshot().addresses[0]?.address).toBe(BLUE_EXTERNAL_0);
+    file.close();
     db.close();
   });
 

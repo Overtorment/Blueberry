@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createMessageBus } from "../../src/bus/message-bus.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 import { createPeersDiscoveryModule } from "../../src/modules/peers-discovery.ts";
+import { openTempFileLog } from "./file-log-harness.ts";
 import { stubPlatformNet } from "./stub-platform-net.ts";
 
 function waitFor(
@@ -100,6 +101,35 @@ describe("peers-discovery", () => {
     expect(db.peers.listAlive()).toEqual([]);
     await mod.stop();
     db.close();
+  });
+
+  test("logs DNS seed count", async () => {
+    const file = openTempFileLog();
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [
+          { host: "10.0.0.1", port: 8333, services: 0n },
+          { host: "10.0.0.2", port: 8333, services: 0n },
+        ],
+        probe: async () => ({ ok: false, error: "skip" }),
+        concurrency: 1,
+        idleDelayMs: 50,
+        minAliveCompactFilters: 0,
+      },
+    );
+    await mod.start();
+    await waitFor(() => db.peers.count() === 2);
+    await mod.stop();
+    const text = file.read();
+    file.close();
+    db.close();
+    expect(text).toContain("[peers-discovery] start");
+    expect(text).toContain("[peers-discovery] dns seeds=2");
+    expect(text).toContain("[peers-discovery] stop");
   });
 
   test("alive peers skip DNS; successful probe stores neighbors and marks source alive", async () => {
@@ -506,6 +536,38 @@ describe("peers-discovery", () => {
     db.close();
   });
 
+  test("logs probe fail with host", async () => {
+    const file = openTempFileLog();
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "9.9.9.9",
+      port: 8333,
+      services: 0n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        probe: async () => ({ ok: false, error: "timeout" }),
+        concurrency: 1,
+        idleDelayMs: 50,
+        minAliveCompactFilters: 0,
+      },
+    );
+    await mod.start();
+    await waitFor(() => db.peers.list()[0]?.lastProbedAt !== null);
+    await mod.stop();
+    const text = file.read();
+    file.close();
+    db.close();
+    expect(text).toContain("[peers-discovery] probe fail 9.9.9.9:8333 error=timeout");
+  });
+
   test("does not immediately re-probe a peer that just failed", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
@@ -593,6 +655,7 @@ describe("peers-discovery", () => {
   });
 
   test("sync:idle pauses probes; sync:catchup resumes", async () => {
+    const file = openTempFileLog();
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
     db.peers.upsert({
@@ -645,6 +708,10 @@ describe("peers-discovery", () => {
     bus.emit("sync:catchup", { at: Date.now(), reason: "headers" });
     await waitFor(() => probes > atIdle);
     await mod.stop();
+    const text = file.read();
+    file.close();
+    expect(text).toContain("[peers-discovery] pause");
+    expect(text).toContain("[peers-discovery] resume");
     db.close();
   });
 

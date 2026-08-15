@@ -1,6 +1,7 @@
 import { Networks } from "bip324";
 import { NODE_COMPACT_FILTERS } from "bip157";
 import { config } from "../config.ts";
+import { log, logError } from "../log.ts";
 import {
   MAINNET_DNS_SEEDS,
   resolveSeedPeers,
@@ -72,6 +73,7 @@ export function createPeersDiscoveryModule(
     const wantPause = syncIdle && ctx.db.peers.listAlive().length > 0;
     if (wantPause === paused) return;
     paused = wantPause;
+    log("peers-discovery", paused ? "pause" : "resume");
     kick();
   }
 
@@ -124,13 +126,14 @@ export function createPeersDiscoveryModule(
     try {
       const seeds = await resolveSeeds();
       if (stopped || paused) return;
+      log("peers-discovery", `dns seeds=${seeds.length}`);
       for (const candidate of seeds) upsertCandidate(candidate);
       if (seeds.length > 0) {
         emitUpdated();
         kick();
       }
-    } catch {
-      // ignore DNS failures; probe loop continues
+    } catch (err) {
+      logError("peers-discovery", "dns", err);
     } finally {
       lastReseedAt = now();
       dnsInFlight = false;
@@ -233,12 +236,16 @@ export function createPeersDiscoveryModule(
               for (const peer of result.peers) upsertCandidate(peer);
               ctx.db.peers.markAlive(next.host, next.port, true);
             } else {
-              // Stale "alive" entries block filter/header sync peer pools.
+              log(
+                "peers-discovery",
+                `probe fail ${key} error=${result.error}`,
+              );
               ctx.db.peers.markAlive(next.host, next.port, false);
             }
             emitUpdated();
-          } catch {
+          } catch (err) {
             if (stopped) return;
+            logError("peers-discovery", `probe fail ${key}`, err);
             ctx.db.peers.markProbed(next.host, next.port, now());
             ctx.db.peers.markAlive(next.host, next.port, false);
             emitUpdated();
@@ -278,6 +285,7 @@ export function createPeersDiscoveryModule(
         module: "peers-discovery",
         status: "starting",
       });
+      log("peers-discovery", "start");
       stopped = false;
       unsubIdle = ctx.bus.on("sync:idle", () => {
         syncIdle = true;
@@ -302,6 +310,7 @@ export function createPeersDiscoveryModule(
     stop() {
       if (stopped) return;
       stopped = true;
+      log("peers-discovery", "stop");
       unsubIdle?.();
       unsubCatchup?.();
       unsubPeers?.();

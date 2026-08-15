@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { hexToBytes, NODE_COMPACT_FILTERS } from "bip157";
+import { openTempFileLog } from "./file-log-harness.ts";
 import { createMessageBus } from "../../src/bus/message-bus.ts";
 import { checkpointDbRecord } from "../../src/checkpoint.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
@@ -161,6 +162,44 @@ describe("sync-idle", () => {
 
     await mod.stop();
     db.close();
+  });
+
+  test("logs idle and catchup transitions", async () => {
+    const file = openTempFileLog();
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    const tip = seedCaughtUpDb(db);
+    const idles: number[] = [];
+    const catchups: string[] = [];
+    bus.on("sync:idle", (p) => idles.push(p.at));
+    bus.on("sync:catchup", (p) => catchups.push(p.reason));
+
+    const mod = createSyncIdleModule(
+      { bus, db },
+      { evalIntervalMs: 10_000, minAliveCompactFilters: 1 },
+    );
+    await mod.start();
+    enterIdle(bus);
+    await waitFor(() => idles.length >= 1);
+
+    db.matchedBlocks.insert({
+      height: tip.height,
+      blockHashInternalHex: tip.hashInternalHex,
+    });
+    bus.emit("filters:match", {
+      height: tip.height,
+      blockHashInternalHex: tip.hashInternalHex,
+    });
+    await waitFor(() => catchups.includes("blocks"));
+    await mod.stop();
+
+    const text = file.read();
+    file.close();
+    db.close();
+    expect(text).toContain("[sync-idle] start");
+    expect(text).toContain("[sync-idle] idle");
+    expect(text).toContain("[sync-idle] catchup reason=blocks");
+    expect(text).toContain("[sync-idle] stop");
   });
 
   test("idle → catchup:blocks when a matched block needs download", async () => {
