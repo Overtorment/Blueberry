@@ -1,6 +1,6 @@
 {
   "name": "blueberry",
-  "version": "0.0.1",
+  "version": "2026.08.17",
   "type": "module",
   "scripts": {
     "start": "bun src/main.tsx",
