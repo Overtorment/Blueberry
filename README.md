@@ -13,6 +13,7 @@ Blueberry is a light Bitcoin wallet that runs in the terminal. It uses Neutrino-
 
 * [ ] Seed encryption on disk after onboarding
 * [ ] camera QR scan
+* [ ] Payment Codes (BIP47 + SP)
 
 ## Features
 
