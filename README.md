@@ -6,6 +6,14 @@ Early software. Still under active development.
 
 Blueberry is a light Bitcoin wallet that runs in the terminal. It uses Neutrino-style compact filters to sync without downloading the full chain, and it favors private network paths — encrypted BIP-324 peers, and Tor when you broadcast a spend. You can create or restore a wallet, see balance and history, receive, and send.
 
+<img width="3750" height="2022" alt="image" src="https://github.com/user-attachments/assets/3375738f-3b95-4b42-8795-3df4fefca94a" />
+
+
+## TODO
+
+* [ ] Seed encryption on disk after onboarding
+* [ ] camera QR scan
+
 ## Features
 
 - **Neutrino light sync** — headers + compact filters; fetch full blocks only when they match your wallet
@@ -16,5 +24,6 @@ Blueberry is a light Bitcoin wallet that runs in the terminal. It uses Neutrino-
 - **Receive**
 - **Send** — set amount or send max; hot wallets sign in-app; watch-only export for external signing
 - **Live sync dashboard** — peers, chain tip, filters, matching, blocks, balance, and transactions in one TUI
+- **Desktop cli** but has UI
 
 Built for people who want Neutrino-style light sync and stronger privacy, without leaving the terminal
