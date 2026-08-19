@@ -12,6 +12,7 @@ import {
   startUiBroadcast,
 } from "../broadcast-actions.ts";
 import { fitCryptoPsbtUrQr } from "../fit-ur-qr.ts";
+import { savePaymentLabel } from "../payment-label-actions.ts";
 import { buildActiveSendTx, pickUtxosByKeys } from "../send-context.ts";
 import { THEME } from "../theme.ts";
 import { qrAsciiLinesFitting, qrAsciiLinesCompact } from "../qr-ascii.ts";
@@ -33,6 +34,7 @@ type SendStep = "utxos" | "details" | "feerate" | "preview";
 type SendDetails = {
   toAddress: string;
   amountSats: bigint | "max";
+  paymentLabel: string;
 };
 
 /** BlueWallet DynamicQRCode interval. */
@@ -77,6 +79,7 @@ function FeeHelpLine(props: {
   label: string;
   toAddress: string;
   amountSats: bigint | "max";
+  paymentLabel: string;
   inputSum: bigint;
 }) {
   const paid =
@@ -97,6 +100,7 @@ function FeeHelpLine(props: {
           <BtcAmount sats={props.preview.changeSats} />
         </>
       ) : null}
+      {` · ${props.paymentLabel}`}
       {" · Esc to close"}
     </text>
   );
@@ -249,6 +253,7 @@ function SignedTxPreviewBody(props: {
   preview: BuildSendResult;
   toAddress: string;
   amountSats: bigint | "max";
+  paymentLabel: string;
   inputSum: bigint;
 }) {
   const broadcast = useBroadcast();
@@ -283,6 +288,7 @@ function SignedTxPreviewBody(props: {
         label="Signed tx"
         toAddress={props.toAddress}
         amountSats={props.amountSats}
+        paymentLabel={props.paymentLabel}
         inputSum={props.inputSum}
       />
       <text fg={THEME.fgDim}>Transaction hex (broadcast-ready)</text>
@@ -330,6 +336,7 @@ function SendPreviewBody(props: {
           label="Unsigned PSBT · scan to sign"
           toAddress={props.details.toAddress}
           amountSats={props.details.amountSats}
+          paymentLabel={props.details.paymentLabel}
           inputSum={props.inputSum}
         />
         <AnimatedUrQr psbtHex={props.preview.psbtHex} />
@@ -343,6 +350,7 @@ function SendPreviewBody(props: {
       preview={props.preview}
       toAddress={props.details.toAddress}
       amountSats={props.details.amountSats}
+      paymentLabel={props.details.paymentLabel}
       inputSum={props.inputSum}
     />
   );
@@ -406,45 +414,75 @@ function SendDetailsForm(props: {
 }) {
   const [address, setAddress] = useState("");
   const [amount, setAmount] = useState("");
-  const [field, setField] = useState<"address" | "amount">("address");
+  const [paymentLabel, setPaymentLabel] = useState("");
+  const [field, setField] = useState<"address" | "amount" | "label">("address");
   const [addressInvalid, setAddressInvalid] = useState(false);
   const [amountInvalid, setAmountInvalid] = useState(false);
+  const [labelInvalid, setLabelInvalid] = useState(false);
 
   useKeyboard((key) => {
     if (key.name === "up") {
-      setField("address");
+      setField((f) =>
+        f === "label" ? "amount" : f === "amount" ? "address" : "address",
+      );
       return;
     }
     if (key.name === "down") {
-      setField("amount");
+      setField((f) =>
+        f === "address" ? "amount" : f === "amount" ? "label" : "label",
+      );
       return;
     }
     if (key.name === "return" || key.name === "enter") {
       if (!isAddressValid(address)) {
         setAddressInvalid(true);
         setAmountInvalid(false);
+        setLabelInvalid(false);
         setField("address");
         return;
       }
       setAddressInvalid(false);
       if (isSendMaxAmount(amount)) {
+        if (paymentLabel.trim() === "") {
+          setAmountInvalid(false);
+          setLabelInvalid(true);
+          setField("label");
+          return;
+        }
         setAmountInvalid(false);
-        props.onContinue({ toAddress: address.trim(), amountSats: "max" });
+        setLabelInvalid(false);
+        props.onContinue({
+          toAddress: address.trim(),
+          amountSats: "max",
+          paymentLabel: paymentLabel.trim(),
+        });
         return;
       }
       const sats = parseBtcToSats(amount);
       if (sats === null || sats <= 0n || sats > props.selectedSumSats) {
         setAmountInvalid(true);
+        setLabelInvalid(false);
         setField("amount");
         return;
       }
       setAmountInvalid(false);
-      props.onContinue({ toAddress: address.trim(), amountSats: sats });
+      if (paymentLabel.trim() === "") {
+        setLabelInvalid(true);
+        setField("label");
+        return;
+      }
+      setLabelInvalid(false);
+      props.onContinue({
+        toAddress: address.trim(),
+        amountSats: sats,
+        paymentLabel: paymentLabel.trim(),
+      });
     }
   });
 
   const addressColor = addressInvalid ? THEME.error : undefined;
   const amountColor = amountInvalid ? THEME.error : undefined;
+  const labelColor = labelInvalid ? THEME.error : undefined;
 
   return (
     <box
@@ -481,6 +519,18 @@ function SendDetailsForm(props: {
         onInput={(v) => {
           setAmount(v);
           if (amountInvalid) setAmountInvalid(false);
+        }}
+      />
+      <text fg={labelInvalid ? THEME.error : THEME.fgDim}>Payment label</text>
+      <input
+        focused={field === "label"}
+        value={paymentLabel}
+        placeholder="groceries"
+        textColor={labelColor}
+        focusedTextColor={labelColor}
+        onInput={(v) => {
+          setPaymentLabel(v);
+          if (labelInvalid) setLabelInvalid(false);
         }}
       />
     </box>
@@ -849,6 +899,11 @@ export function WalletModal({ kind }: WalletModalProps) {
                   toAddress: details.toAddress,
                   amountSats: details.amountSats,
                   feeRateSatPerVb,
+                });
+                savePaymentLabel({
+                  txid: result.txid,
+                  label: details.paymentLabel,
+                  changeVouts: result.changeVouts,
                 });
                 setPreview(result);
                 setPreviewInputSum(inputSum);
