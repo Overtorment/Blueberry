@@ -249,7 +249,6 @@ describe("TUI wallet txs wiring", () => {
     db.txPaymentLabels.upsert({
       txid: newer.getId(),
       label: "lunch",
-      changeVouts: "0",
     });
     db.utxoNames.upsert(`${newer.getId()}:0`, "lunch money");
 

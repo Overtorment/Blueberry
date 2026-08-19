@@ -10,7 +10,6 @@ import {
   loadWatchGaps,
   saveWatchGaps,
 } from "../wallet/watch-gaps.ts";
-import { applyPaymentLabelOnParsedTx } from "../tui/payment-label-actions.ts";
 import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
@@ -184,7 +183,6 @@ export function createParseBlocksModule(
             tx: tx.tx,
             netDeltaSats: 0,
           });
-          applyPaymentLabelOnParsedTx(ctx.db, tx.txid);
         }
         ctx.db.parsedBlocks.mark(block.height);
         if (watchTxs.length > 0) {

@@ -20,21 +20,9 @@ export function savePaymentLabel(params: SavePaymentLabelParams): void {
   activeDb.txPaymentLabels.upsert({
     txid: params.txid,
     label,
-    changeVouts: params.changeVouts.join(","),
   });
-}
-
-export function applyPaymentLabelOnParsedTx(db: Database, txid: string): void {
-  const pending = db.txPaymentLabels.get(txid);
-  if (!pending) return;
-  if (pending.changeVouts === "") return;
-  const name = `change from: ${pending.label}`;
-  for (const part of pending.changeVouts.split(",")) {
-    if (part === "") continue;
-    const vout = Number(part);
-    const out = outpointKey(txid, vout);
-    if (db.utxoNames.get(out) === null) {
-      db.utxoNames.upsert(out, name);
-    }
+  const name = `change from: ${label}`;
+  for (const vout of params.changeVouts) {
+    activeDb.utxoNames.upsert(outpointKey(params.txid, vout), name);
   }
 }

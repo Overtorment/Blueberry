@@ -1044,47 +1044,31 @@ export function createSqliteDatabase(path: string): Database {
   };
 
   const upsertTxPaymentLabel = raw.query(
-    `INSERT INTO tx_payment_labels(txid, label, change_vouts)
-     VALUES (?, ?, ?)
-     ON CONFLICT(txid) DO UPDATE SET
-       label = excluded.label,
-       change_vouts = excluded.change_vouts`,
+    `INSERT INTO tx_payment_labels(txid, label)
+     VALUES (?, ?)
+     ON CONFLICT(txid) DO UPDATE SET label = excluded.label`,
   );
   const getTxPaymentLabel = raw.query(
-    `SELECT txid, label, change_vouts FROM tx_payment_labels WHERE txid = ?`,
+    `SELECT txid, label FROM tx_payment_labels WHERE txid = ?`,
   );
   const listTxPaymentLabels = raw.query(
-    `SELECT txid, label, change_vouts FROM tx_payment_labels ORDER BY txid`,
+    `SELECT txid, label FROM tx_payment_labels ORDER BY txid`,
   );
 
   const txPaymentLabels: TxPaymentLabelsRepository = {
     upsert(row) {
-      upsertTxPaymentLabel.run(row.txid, row.label, row.changeVouts);
+      upsertTxPaymentLabel.run(row.txid, row.label);
     },
     get(txid) {
       const row = getTxPaymentLabel.get(txid) as {
         txid: string;
         label: string;
-        change_vouts: string;
       } | null;
       if (!row) return null;
-      return {
-        txid: row.txid,
-        label: row.label,
-        changeVouts: row.change_vouts,
-      };
+      return { txid: row.txid, label: row.label };
     },
     list() {
-      const rows = listTxPaymentLabels.all() as Array<{
-        txid: string;
-        label: string;
-        change_vouts: string;
-      }>;
-      return rows.map((row) => ({
-        txid: row.txid,
-        label: row.label,
-        changeVouts: row.change_vouts,
-      }));
+      return listTxPaymentLabels.all() as TxPaymentLabel[];
     },
   };
 

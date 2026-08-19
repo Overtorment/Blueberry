@@ -3,7 +3,6 @@ import { hex } from "@scure/base";
 import { Transaction } from "@scure/btc-signer";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 import {
-  applyPaymentLabelOnParsedTx,
   savePaymentLabel,
   setActivePaymentLabelContext,
 } from "../../src/tui/payment-label-actions.ts";
@@ -65,8 +64,10 @@ describe("savePaymentLabel", () => {
     expect(db.txPaymentLabels.get(built.txid)).toEqual({
       txid: built.txid,
       label: "groceries",
-      changeVouts: vouts.join(","),
     });
+    expect(db.utxoNames.get(outpointKey(built.txid, vouts[0]!))).toBe(
+      "change from: groceries",
+    );
     db.close();
   });
 
@@ -90,7 +91,8 @@ describe("savePaymentLabel", () => {
       changeVouts: built.changeVouts,
     });
 
-    expect(db.txPaymentLabels.get(built.txid)?.changeVouts).toBe("");
+    expect(db.txPaymentLabels.get(built.txid)?.label).toBe("empty wallet");
+    expect(db.utxoNames.list()).toEqual([]);
     db.close();
   });
 
@@ -100,64 +102,6 @@ describe("savePaymentLabel", () => {
     expect(() =>
       savePaymentLabel({ txid: "aa".repeat(32), label: "   ", changeVouts: [] }),
     ).toThrow("payment label is required");
-    db.close();
-  });
-});
-
-describe("applyPaymentLabelOnParsedTx", () => {
-  test("names change outpoints and keeps the tx label row", () => {
-    const db = createSqliteDatabase(":memory:");
-    const txid = "bb".repeat(32);
-    db.txPaymentLabels.upsert({
-      txid,
-      label: "coffee",
-      changeVouts: "1",
-    });
-
-    applyPaymentLabelOnParsedTx(db, txid);
-
-    expect(db.utxoNames.get(outpointKey(txid, 1))).toBe("change from: coffee");
-    expect(db.txPaymentLabels.get(txid)?.label).toBe("coffee");
-    db.close();
-  });
-
-  test("send-max writes no UTXO name", () => {
-    const db = createSqliteDatabase(":memory:");
-    const txid = "cc".repeat(32);
-    db.txPaymentLabels.upsert({
-      txid,
-      label: "all in",
-      changeVouts: "",
-    });
-
-    applyPaymentLabelOnParsedTx(db, txid);
-
-    expect(db.utxoNames.list()).toEqual([]);
-    expect(db.txPaymentLabels.get(txid)?.label).toBe("all in");
-    db.close();
-  });
-
-  test("does not overwrite an existing UTXO name", () => {
-    const db = createSqliteDatabase(":memory:");
-    const txid = "dd".repeat(32);
-    const out = outpointKey(txid, 0);
-    db.txPaymentLabels.upsert({
-      txid,
-      label: "new",
-      changeVouts: "0",
-    });
-    db.utxoNames.upsert(out, "user rename");
-
-    applyPaymentLabelOnParsedTx(db, txid);
-
-    expect(db.utxoNames.get(out)).toBe("user rename");
-    db.close();
-  });
-
-  test("no-op when no payment label row exists", () => {
-    const db = createSqliteDatabase(":memory:");
-    applyPaymentLabelOnParsedTx(db, "ee".repeat(32));
-    expect(db.utxoNames.list()).toEqual([]);
     db.close();
   });
 });

@@ -39,7 +39,7 @@ export function Transactions() {
         ) : null}
         {visibleTxs.length > 0
           ? visibleTxs.map((tx) => (
-              <text key={tx.txid}>
+              <text key={tx.txid} wrapMode="none">
                 <span fg={THEME.fg}>
                   {`${tx.timeLabel}  ${tx.shortTxid}  `}
                 </span>
