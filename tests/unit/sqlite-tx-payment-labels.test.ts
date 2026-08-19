@@ -9,29 +9,14 @@ describe("tx_payment_labels", () => {
     expect(db.txPaymentLabels.get(txid)).toBeNull();
     expect(db.txPaymentLabels.list()).toEqual([]);
 
-    db.txPaymentLabels.upsert({
-      txid,
-      label: "rent",
-      changeVouts: "1",
-    });
-    expect(db.txPaymentLabels.get(txid)).toEqual({
-      txid,
-      label: "rent",
-      changeVouts: "1",
-    });
-    expect(db.txPaymentLabels.list()).toEqual([
-      { txid, label: "rent", changeVouts: "1" },
-    ]);
+    db.txPaymentLabels.upsert({ txid, label: "rent" });
+    expect(db.txPaymentLabels.get(txid)).toEqual({ txid, label: "rent" });
+    expect(db.txPaymentLabels.list()).toEqual([{ txid, label: "rent" }]);
 
-    db.txPaymentLabels.upsert({
-      txid,
-      label: "rent paid",
-      changeVouts: "",
-    });
+    db.txPaymentLabels.upsert({ txid, label: "rent paid" });
     expect(db.txPaymentLabels.get(txid)).toEqual({
       txid,
       label: "rent paid",
-      changeVouts: "",
     });
     expect(db.txPaymentLabels.list()).toHaveLength(1);
 

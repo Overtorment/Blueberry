@@ -145,7 +145,6 @@ export interface UtxoNamesRepository {
 export type TxPaymentLabel = {
   txid: string;
   label: string;
-  changeVouts: string;
 };
 
 export interface TxPaymentLabelsRepository {
