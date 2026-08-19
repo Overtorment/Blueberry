@@ -26,6 +26,8 @@ import type {
   StoredHeader,
   StoredTx,
   TransactionsRepository,
+  TxPaymentLabel,
+  TxPaymentLabelsRepository,
   UtxoNamesRepository,
 } from "./types.ts";
 
@@ -1041,6 +1043,51 @@ export function createSqliteDatabase(path: string): Database {
     },
   };
 
+  const upsertTxPaymentLabel = raw.query(
+    `INSERT INTO tx_payment_labels(txid, label, change_vouts)
+     VALUES (?, ?, ?)
+     ON CONFLICT(txid) DO UPDATE SET
+       label = excluded.label,
+       change_vouts = excluded.change_vouts`,
+  );
+  const getTxPaymentLabel = raw.query(
+    `SELECT txid, label, change_vouts FROM tx_payment_labels WHERE txid = ?`,
+  );
+  const listTxPaymentLabels = raw.query(
+    `SELECT txid, label, change_vouts FROM tx_payment_labels ORDER BY txid`,
+  );
+
+  const txPaymentLabels: TxPaymentLabelsRepository = {
+    upsert(row) {
+      upsertTxPaymentLabel.run(row.txid, row.label, row.changeVouts);
+    },
+    get(txid) {
+      const row = getTxPaymentLabel.get(txid) as {
+        txid: string;
+        label: string;
+        change_vouts: string;
+      } | null;
+      if (!row) return null;
+      return {
+        txid: row.txid,
+        label: row.label,
+        changeVouts: row.change_vouts,
+      };
+    },
+    list() {
+      const rows = listTxPaymentLabels.all() as Array<{
+        txid: string;
+        label: string;
+        change_vouts: string;
+      }>;
+      return rows.map((row) => ({
+        txid: row.txid,
+        label: row.label,
+        changeVouts: row.change_vouts,
+      }));
+    },
+  };
+
   const transactions: TransactionsRepository = {
     upsert(tx) {
       upsertTransaction.run(
@@ -1168,6 +1215,7 @@ export function createSqliteDatabase(path: string): Database {
     transactions,
     keyValue,
     utxoNames,
+    txPaymentLabels,
     transaction(fn) {
       inTx(fn);
     },
