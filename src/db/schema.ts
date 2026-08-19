@@ -73,6 +73,12 @@ export function ensureSchema(raw: BunDatabase): void {
       name TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS tx_payment_labels (
+      txid TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      change_vouts TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS headers_hash_internal_hex
       ON headers(hash_internal_hex);
     CREATE INDEX IF NOT EXISTS filters_height_hash

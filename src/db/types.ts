@@ -142,6 +142,18 @@ export interface UtxoNamesRepository {
   list(): UtxoNameRow[];
 }
 
+export type TxPaymentLabel = {
+  txid: string;
+  label: string;
+  changeVouts: string;
+};
+
+export interface TxPaymentLabelsRepository {
+  upsert(row: TxPaymentLabel): void;
+  get(txid: string): TxPaymentLabel | null;
+  list(): TxPaymentLabel[];
+}
+
 export type MatchedBlock = {
   height: number;
   blockHashInternalHex: string;
@@ -220,6 +232,7 @@ export interface Database {
   transactions: TransactionsRepository;
   keyValue: KeyValueRepository;
   utxoNames: UtxoNamesRepository;
+  txPaymentLabels: TxPaymentLabelsRepository;
   /** Run fn in one SQLite transaction (nested calls join the open tx). */
   transaction(fn: () => void): void;
   /** Delete height-dependent chain rows with height > ancestorHeight. */
