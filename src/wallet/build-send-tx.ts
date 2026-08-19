@@ -11,6 +11,7 @@ import {
   selectUTXO,
   Transaction,
 } from "@scure/btc-signer";
+import { sha256x2 } from "@scure/btc-signer/utils";
 import { scriptHex } from "../parse/extract.ts";
 import { isAddressValid } from "./is-address-valid.ts";
 import {
@@ -43,17 +44,21 @@ export type BuildSendTxParams = {
 export type BuildSendTxResult = {
   kind: "signed";
   txHex: string;
+  txid: string;
   feeSats: bigint;
   vsize: number;
   changeSats: bigint;
+  changeVouts: number[];
 };
 
 export type BuildSendPsbtResult = {
   kind: "psbt";
   psbtHex: string;
+  txid: string;
   feeSats: bigint;
   vsize: number;
   changeSats: bigint;
+  changeVouts: number[];
 };
 
 export type BuildSendResult = BuildSendTxResult | BuildSendPsbtResult;
@@ -188,6 +193,48 @@ function changeSatsFromTx(
     return change > 0n ? change : 0n;
   }
   return matched;
+}
+
+export function changeOutputVouts(
+  tx: Transaction,
+  changeAddress: string,
+  toAddress: string,
+  paymentAmount: bigint | "max",
+): number[] {
+  if (paymentAmount === "max") return [];
+  const vouts: number[] = [];
+  for (let i = 0; i < tx.outputsLength; i++) {
+    if (!addressesEqual(tx.getOutputAddress(i), changeAddress)) continue;
+    const out = tx.getOutput(i);
+    if (out.amount === undefined) continue;
+    if (
+      addressesEqual(toAddress, changeAddress) &&
+      out.amount === paymentAmount
+    ) {
+      continue;
+    }
+    vouts.push(i);
+  }
+  return vouts;
+}
+
+function sendIdAndChange(
+  tx: Transaction,
+  params: BuildSendTxParams,
+): { txid: string; changeVouts: number[] } {
+  const txid = tx.isFinal
+    ? tx.id
+    : hex.encode(sha256x2(tx.toBytes(true)).reverse());
+  if (!txid) throw new Error("missing txid");
+  return {
+    txid,
+    changeVouts: changeOutputVouts(
+      tx,
+      params.changeAddress,
+      params.toAddress,
+      params.amountSats,
+    ),
+  };
 }
 
 /**
@@ -463,6 +510,7 @@ export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult 
   return {
     kind: "signed",
     txHex: tx.hex,
+    ...sendIdAndChange(tx, params),
     feeSats: tx.fee,
     vsize: tx.vsize,
     changeSats:
@@ -487,6 +535,7 @@ export function buildUnsignedSendPsbt(
   return {
     kind: "psbt",
     psbtHex: hex.encode(tx.toPSBT(0)),
+    ...sendIdAndChange(tx, params),
     feeSats,
     vsize,
     changeSats:

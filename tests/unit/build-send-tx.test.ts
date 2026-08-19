@@ -6,6 +6,7 @@ import {
   buildSend,
   buildSignedSendTx,
   buildUnsignedSendPsbt,
+  changeOutputVouts,
 } from "../../src/wallet/build-send-tx.ts";
 import { deriveWatchWallet } from "../../src/wallet/derive.ts";
 import { BIP84_ZPUB_VERSIONS } from "../../src/wallet/secret.ts";
@@ -66,6 +67,12 @@ describe("buildSignedSendTx", () => {
     const destIdx =
       tx.getOutputAddress(0) === BLUE_EXTERNAL_1 ? 0 : 1;
     expect(tx.getOutput(destIdx).amount).toBe(amountSats);
+    expect(result.txid).toBe(tx.id);
+    expect(result.changeVouts).toEqual(
+      changeOutputVouts(tx, BLUE_INTERNAL_0, BLUE_EXTERNAL_1, amountSats),
+    );
+    expect(result.changeVouts).toHaveLength(1);
+    expect(tx.getOutputAddress(result.changeVouts[0]!)).toBe(BLUE_INTERNAL_0);
   });
 
   test("1 sat/vB yields fee equal to vsize", () => {
@@ -120,6 +127,28 @@ describe("buildSignedSendTx", () => {
     expect(tx.outputsLength).toBe(1);
     expect(tx.getOutputAddress(0)).toBe(BLUE_EXTERNAL_1);
     expect(tx.getOutput(0).amount).toBe(utxo.valueSats - result.feeSats);
+    expect(result.txid).toBe(tx.id);
+    expect(result.changeVouts).toEqual([]);
+  });
+
+  test("self-send change vout skips the payment output", () => {
+    const wallet = abandonWallet();
+    const amountSats = 10_000n;
+    const result = buildSignedSendTx({
+      secret: MNEMONIC,
+      wallet,
+      utxos: [utxoAt(wallet)],
+      toAddress: BLUE_INTERNAL_0,
+      amountSats,
+      feeRateSatPerVb: 1,
+      changeAddress: BLUE_INTERNAL_0,
+    });
+    const tx = Transaction.fromRaw(hex.decode(result.txHex));
+    expect(result.changeVouts).toEqual(
+      changeOutputVouts(tx, BLUE_INTERNAL_0, BLUE_INTERNAL_0, amountSats),
+    );
+    expect(result.changeVouts).toHaveLength(1);
+    expect(tx.getOutput(result.changeVouts[0]!).amount).not.toBe(amountSats);
   });
 
   test("send-max with multiple utxos uses all inputs and one output", () => {
