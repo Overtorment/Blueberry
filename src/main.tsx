@@ -42,6 +42,7 @@ import { setActiveStatusStore } from "./tui/use-module-status.ts";
 import { setActivePeerSocketsStore } from "./tui/use-peer-sockets.ts";
 import { setActiveReceiveAddressStore } from "./tui/use-receive-address.ts";
 import { setActiveWalletTxsStore } from "./tui/use-wallet-txs.ts";
+import { setActivePaymentLabelContext } from "./tui/payment-label-actions.ts";
 import { setActiveSendContext } from "./tui/send-context.ts";
 import { setActiveUtxoNamesContext } from "./tui/utxo-names-actions.ts";
 import { createUiRouteStore } from "./tui/ui-route-store.ts";
@@ -205,6 +206,7 @@ async function startApp(db: Database): Promise<void> {
 
   const wallet = createWallet(db);
   setActiveSendContext(db, wallet);
+  setActivePaymentLabelContext(db);
   setActiveUtxoNamesContext(db, wallet, walletTxsStore);
 
   const modules: Module[] = [
