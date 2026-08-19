@@ -44,6 +44,9 @@ export function Transactions() {
                   {`${tx.timeLabel}  ${tx.shortTxid}  `}
                 </span>
                 <BtcAmount sats={BigInt(tx.netDeltaSats)} plus />
+                {tx.paymentLabel ? (
+                  <span fg={THEME.fg}>{`  ${tx.paymentLabel}`}</span>
+                ) : null}
               </text>
             ))
           : !hasParseBacklog
