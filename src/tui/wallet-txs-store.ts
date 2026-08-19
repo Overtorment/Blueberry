@@ -23,6 +23,8 @@ export type WalletTxRow = {
   timeLabel: string;
   netDeltaSats: number;
   netDeltaLabel: string;
+  /** User payment label from tx_payment_labels; null when unset. */
+  paymentLabel: string | null;
 };
 
 export type WalletUtxoRow = {
@@ -110,6 +112,9 @@ export function snapshotFromDb(
   const stored = db.transactions.list();
   const balanceSats = stored.reduce((s, t) => s + BigInt(t.netDeltaSats), 0n);
   const timeLabels = new Map<number, string>();
+  const labelByTxid = new Map(
+    db.txPaymentLabels.list().map((r) => [r.txid, r.label]),
+  );
 
   let utxos: WalletUtxoRow[] = [];
   if (wallet) {
@@ -171,6 +176,7 @@ export function snapshotFromDb(
         timeLabel: timeLabelForHeight(db, tx.height, nowMs, timeLabels),
         netDeltaSats: tx.netDeltaSats,
         netDeltaLabel: formatNetDelta(delta),
+        paymentLabel: labelByTxid.get(tx.txid) ?? null,
       };
     }),
     utxos,

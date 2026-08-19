@@ -246,6 +246,11 @@ describe("TUI wallet txs wiring", () => {
       tx: newer.toBuffer(),
       netDeltaSats: 500,
     });
+    db.txPaymentLabels.upsert({
+      txid: newer.getId(),
+      label: "lunch",
+      changeVouts: "0",
+    });
     db.utxoNames.upsert(`${newer.getId()}:0`, "lunch money");
 
     const snap = snapshotFromDb(db, nowMs, nowMs, wallet);
@@ -257,6 +262,10 @@ describe("TUI wallet txs wiring", () => {
     );
     expect(snap.utxos[0]?.name).toBe("lunch money");
     expect(snap.utxos[1]?.name).toBeNull();
+    expect(snap.txs.find((t) => t.txid === newer.getId())?.paymentLabel).toBe(
+      "lunch",
+    );
+    expect(snap.txs.find((t) => t.txid === older.getId())?.paymentLabel).toBeNull();
     db.close();
   });
 });
