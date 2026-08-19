@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { hex } from "@scure/base";
 import { HDKey } from "@scure/bip32";
 import { Transaction } from "@scure/btc-signer";
+import { sha256x2 } from "@scure/btc-signer/utils";
+import { Transaction as BjsTx } from "bitcoinjs-lib";
 import {
   buildSend,
   buildSignedSendTx,
@@ -68,6 +70,7 @@ describe("buildSignedSendTx", () => {
       tx.getOutputAddress(0) === BLUE_EXTERNAL_1 ? 0 : 1;
     expect(tx.getOutput(destIdx).amount).toBe(amountSats);
     expect(result.txid).toBe(tx.id);
+    expect(result.txid).toBe(BjsTx.fromHex(result.txHex).getId());
     expect(result.changeVouts).toEqual(
       changeOutputVouts(tx, BLUE_INTERNAL_0, BLUE_EXTERNAL_1, amountSats),
     );
@@ -317,12 +320,13 @@ describe("buildSignedSendTx", () => {
 describe("buildSend / unsigned PSBT", () => {
   test("zpub returns unsigned PSBT; mnemonic returns signed tx", () => {
     const zWallet = deriveWatchWallet(BLUE_ZPUB, { external: 2, internal: 1 });
+    const amountSats = 50_000n;
     const psbt = buildSend({
       secret: BLUE_ZPUB,
       wallet: zWallet,
       utxos: [utxoAt(zWallet)],
       toAddress: BLUE_EXTERNAL_1,
-      amountSats: 50_000n,
+      amountSats,
       feeRateSatPerVb: 10,
       changeAddress: BLUE_INTERNAL_0,
     });
@@ -330,6 +334,18 @@ describe("buildSend / unsigned PSBT", () => {
     if (psbt.kind !== "psbt") throw new Error("unreachable");
     expect(psbt.psbtHex.startsWith("70736274ff")).toBe(true);
     expect(psbt.changeSats).toBeGreaterThan(0n);
+    const unsignedTx = Transaction.fromPSBT(hex.decode(psbt.psbtHex));
+    const expectedTxid = hex.encode(sha256x2(unsignedTx.toBytes(true)).reverse());
+    expect(psbt.txid).toBe(expectedTxid);
+    expect(psbt.changeVouts).toEqual(
+      changeOutputVouts(
+        unsignedTx,
+        BLUE_INTERNAL_0,
+        BLUE_EXTERNAL_1,
+        amountSats,
+      ),
+    );
+    expect(psbt.changeVouts).toHaveLength(1);
     // Same builder without secret keys still works.
     expect(
       buildUnsignedSendPsbt({
@@ -380,6 +396,10 @@ describe("buildSend / unsigned PSBT", () => {
     expect(tx.outputsLength).toBe(1);
     expect(tx.getOutputAddress(0)).toBe(BLUE_EXTERNAL_1);
     expect(tx.getOutput(0).amount).toBe(utxo.valueSats - result.feeSats);
+    expect(result.changeVouts).toEqual([]);
+    expect(result.txid).toBe(
+      hex.encode(sha256x2(tx.toBytes(true)).reverse()),
+    );
   });
 
   test("zpub PSBT origin uses account fingerprint and relative path", () => {
