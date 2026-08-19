@@ -63,6 +63,7 @@ describe("wallet txs store active parse ETA", () => {
           timeLabel: "#1".padEnd(16),
           netDeltaSats: 1,
           netDeltaLabel: "+1",
+          paymentLabel: null,
         },
       ],
     });
