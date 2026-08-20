@@ -2,6 +2,7 @@ import { HDKey } from "@scure/bip32";
 import { validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
 import { WIF } from "@scure/btc-signer";
+import { isBip38Key } from "./bip38.ts";
 import {
   isAddressValid,
   watchAddressScriptType,
@@ -92,6 +93,10 @@ export function parseWalletSecret(raw: string): ParsedWalletSecret {
 
   if (/^[xyzvt]p(?:ub|rv)/.test(value)) {
     throw new Error("only mainnet account zpub is supported");
+  }
+
+  if (isBip38Key(value)) {
+    throw new Error("password-protected WIF requires a password");
   }
 
   if (looksLikeWifCandidate(value)) {
