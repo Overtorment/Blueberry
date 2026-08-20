@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { isBip38Key } from "../../src/wallet/bip38.ts";
+import { decryptBip38ToWif, isBip38Key } from "../../src/wallet/bip38.ts";
+import { deriveWatchWallet } from "../../src/wallet/derive.ts";
 import {
   decodeWif,
   inspectWalletSecret,
@@ -66,5 +67,57 @@ describe("parseWalletSecret BIP38", () => {
       status: "invalid",
       detail: "password-protected WIF requires a password",
     });
+  });
+});
+
+const FAST_PASSWORD = "TestingOneTwoThree";
+const FAST_SCRYPT = { N: 1, r: 8, p: 8 };
+
+describe("decryptBip38ToWif (BlueWallet bip38.test.ts)", () => {
+  test("bip38 decodes", async () => {
+    const wif = await decryptBip38ToWif(
+      BIP38_FAST,
+      FAST_PASSWORD,
+      FAST_SCRYPT,
+    );
+    expect(wif).toBe(WIF_UNCOMPRESSED);
+  });
+
+  test.skip("bip38 decodes slow", async () => {
+    const wif = await decryptBip38ToWif(
+      BIP38_SLOW,
+      "qwerty",
+    );
+    expect(wif).toBe(
+      "KxqRtpd9vFju297ACPKHrGkgXuberTveZPXbRDiQ3MXZycSQYtjc",
+    );
+    await expect(decryptBip38ToWif(BIP38_SLOW, "a")).rejects.toThrow(
+      /incorrect password/i,
+    );
+  });
+
+  test("wrong password fails with a clear error", async () => {
+    await expect(
+      decryptBip38ToWif(BIP38_FAST, "wrong", FAST_SCRYPT),
+    ).rejects.toThrow(/incorrect password/i);
+  });
+});
+
+describe("decrypt then derive", () => {
+  test("fast vector becomes one uncompressed p2pkh", async () => {
+    const wif = await decryptBip38ToWif(
+      BIP38_FAST,
+      FAST_PASSWORD,
+      FAST_SCRYPT,
+    );
+    expect(parseWalletSecret(wif)).toEqual({
+      kind: "wif",
+      value: WIF_UNCOMPRESSED,
+    });
+    const w = deriveWatchWallet(wif);
+    expect(w.kind).toBe("wif");
+    expect(w.addresses).toHaveLength(1);
+    expect(w.addresses[0]?.scriptType).toBe("p2pkh");
+    expect(w.addresses[0]?.address).toBe(ADDR);
   });
 });

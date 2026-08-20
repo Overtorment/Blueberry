@@ -22,6 +22,7 @@
     "bip157": "github:Overtorment/bip157#e0ac15b",
     "bip158": "github:Overtorment/bip158#1a38dec",
     "bip324": "github:Overtorment/bip324#948702c",
+    "bip38": "3.1.1",
     "bitcoin-headers": "github:Overtorment/bitcoin-headers#c08d90e",
     "bitcoinjs-lib": "7.0.1",
     "qr": "^0.6.0",
