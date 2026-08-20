@@ -7,8 +7,9 @@
  */
 import { describe, expect, test } from "bun:test";
 import { hex } from "@scure/base";
+import { secp256k1 } from "@noble/curves/secp256k1";
 import { Transaction } from "@scure/btc-signer";
-import { Transaction as BjsTx } from "bitcoinjs-lib";
+import { Transaction as BjsTx, script as bscript } from "bitcoinjs-lib";
 import {
   buildSend,
   buildSignedSendTx,
@@ -429,7 +430,12 @@ describe("WIF signing (BlueWallet-style + mixed types)", () => {
   });
 
   // BIP69 (scure default) reorders inputs by txid bytes. Pass UTXOs in the
-  // opposite order so index-based signing would bind the wrong prevout.
+  // opposite order to check signing still produces a final, valid tx after
+  // that reorder. Both inputs spend the same address/script, so this does
+  // NOT prove that two *different* prevout scripts stay bound to the right
+  // input — signWifTx always reads the script straight off each scure
+  // input's own witnessUtxo, which scure itself keeps paired with that
+  // input across the reorder.
   test("signs two uncompressed p2pkh UTXOs after BIP69 reorder", () => {
     const wallet = deriveWatchWallet(WIF_UNCOMPRESSED);
     const recv = wallet.addresses[0]!;
@@ -474,5 +480,26 @@ describe("WIF signing (BlueWallet-style + mixed types)", () => {
     expect(tx.inputsLength).toBe(2);
     expect(hex.encode(tx.getInput(0).txid!)).toBe(smaller.txid);
     expect(hex.encode(tx.getInput(1).txid!)).toBe(larger.txid);
+
+    // Pin the legacy (SIGHASH_ALL) sighash bytes: verify each input's ECDSA
+    // signature against a sighash computed independently by bitcoinjs-lib's
+    // own hashForSignature. This is what replaces scure's private
+    // tx.preimageLegacy — if our reimplementation ever produced the wrong
+    // preimage (e.g. bound to the wrong prevout script or another input's
+    // outpoint), these signatures would fail to verify.
+    const bjsTx = BjsTx.fromHex(built.txHex);
+    for (let i = 0; i < bjsTx.ins.length; i++) {
+      const decompiled = bscript.decompile(bjsTx.ins[i]!.script);
+      if (!decompiled || decompiled.length !== 2) {
+        throw new Error(`input ${i}: expected [sig, pubkey] scriptSig`);
+      }
+      const [sigWithHashType, pubkey] = decompiled as [Buffer, Buffer];
+      const hashType = sigWithHashType[sigWithHashType.length - 1]!;
+      const signature = sigWithHashType.subarray(0, -1);
+      const sighash = bjsTx.hashForSignature(i, recv.scriptPubKey, hashType);
+      expect(
+        secp256k1.verify(signature, sighash, pubkey, { lowS: false }),
+      ).toBe(true);
+    }
   });
 });

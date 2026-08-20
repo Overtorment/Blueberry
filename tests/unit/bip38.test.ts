@@ -1,3 +1,5 @@
+import { base58check } from "@scure/base";
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import {
   classifyOnboardingSecret,
@@ -29,6 +31,11 @@ const ZPUB =
 const MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const ADDR = "1Jq6MksXQVWzrznvZzxkV6oY57oWXD9TXB";
+
+function sha256(data: Uint8Array): Uint8Array {
+  return new Uint8Array(createHash("sha256").update(data).digest());
+}
+const wifB58 = base58check(sha256);
 
 describe("isBip38Key", () => {
   test("is true for 58-character 6P keys", () => {
@@ -89,7 +96,7 @@ describe("decryptBip38ToWif (BlueWallet bip38.test.ts)", () => {
     expect(wif).toBe(WIF_UNCOMPRESSED);
   });
 
-  test.skip("bip38 decodes slow", async () => {
+  test("bip38 decodes slow", async () => {
     const wif = await decryptBip38ToWif(
       BIP38_SLOW,
       "qwerty",
@@ -100,12 +107,28 @@ describe("decryptBip38ToWif (BlueWallet bip38.test.ts)", () => {
     await expect(decryptBip38ToWif(BIP38_SLOW, "a")).rejects.toThrow(
       /incorrect password/i,
     );
-  });
+  }, 10_000);
 
   test("wrong password fails with a clear error", async () => {
     await expect(
       decryptBip38ToWif(BIP38_FAST, "wrong", FAST_SCRYPT),
     ).rejects.toThrow(/incorrect password/i);
+  });
+
+  test("a malformed EC-mult flag byte is an invalid key, not a wrong password", async () => {
+    // npm bip38's EC-mult path asserts `(flag & 0x24) === flag` before any
+    // scrypt call ('Invalid private key.'). That is corrupt/garbage input,
+    // not a password mismatch, so it must not surface as "incorrect password".
+    const decoded = wifB58.decode(BIP38_SLOW);
+    const corrupted = new Uint8Array(decoded);
+    // Flag bits outside 0x24 trip npm bip38's own assertion, and this value
+    // happens to keep the "6P…" shape (58 chars) so it still reaches that
+    // check instead of being rejected earlier by isBip38Key.
+    corrupted[2] = 0x08;
+    const badKey = wifB58.encode(corrupted);
+    await expect(decryptBip38ToWif(badKey, "whatever")).rejects.toThrow(
+      /invalid password-protected WIF/i,
+    );
   });
 });
 
@@ -168,5 +191,27 @@ describe("masked password input", () => {
     expect(nextPasswordFromMaskedInput("ab", "***")).toBe("ab*");
     expect(nextPasswordFromMaskedInput("ab", "*")).toBe("a");
     expect(nextPasswordFromMaskedInput("ab", "xyz")).toBe("xyz");
+  });
+
+  test("insert-before edit never leaves literal * in the password", () => {
+    // Cursor placed before "ab" (masked "**") and the user types "z": the
+    // widget inserts the literal char ahead of the untouched stars, so the
+    // raw value it reports is "z**". Only append and end-backspace edits
+    // are reconstructable from a masked value alone (see below), so this
+    // falls back to a full replace of the visible edit — but that must
+    // never leave a literal `*` from the old mask in the stored password.
+    const next = nextPasswordFromMaskedInput("ab", "z**");
+    expect(next).not.toContain("*");
+  });
+
+  test("backspace at the front truncates from the end (documented limit)", () => {
+    // A masked value can't reveal *which* star was removed. Only append
+    // and end-backspace are supported; any other shorter-all-stars edit
+    // (e.g. deleting the first character) is treated as an end-truncate.
+    expect(nextPasswordFromMaskedInput("ab", "*")).toBe("a");
+  });
+
+  test("full replace (e.g. select-all and retype) is not corrupted by stars", () => {
+    expect(nextPasswordFromMaskedInput("ab", "hello")).toBe("hello");
   });
 });
