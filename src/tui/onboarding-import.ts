@@ -33,16 +33,32 @@ export function maskPassword(value: string): string {
   return "*".repeat(value.length);
 }
 
+/**
+ * Reconstructs the real password from a masked text input's raw value.
+ *
+ * The widget only ever sees `displayed` (a mix of stars for untouched chars
+ * and literal chars where the user just typed); it carries no cursor
+ * position. Only two edit shapes can be reconstructed unambiguously:
+ *   - append: `displayed` extends the current mask with new literal chars.
+ *   - end-backspace: `displayed` is a shorter, all-star prefix of the mask.
+ * Any other shape (insert before/middle, delete from the front, paste over
+ * a selection, …) is treated as a full replace of the visible edit, with
+ * leftover `*` from the old mask stripped so they never leak into the
+ * stored password.
+ */
 export function nextPasswordFromMaskedInput(
   current: string,
   displayed: string,
 ): string {
   const stars = maskPassword(current);
-  if (displayed.length < current.length) {
-    return current.slice(0, displayed.length);
-  }
-  if (displayed.startsWith(stars)) {
+  if (displayed.length > current.length && displayed.startsWith(stars)) {
     return current + displayed.slice(current.length);
   }
-  return displayed;
+  if (
+    displayed.length <= current.length &&
+    displayed === stars.slice(0, displayed.length)
+  ) {
+    return current.slice(0, displayed.length);
+  }
+  return displayed.replace(/\*/g, "");
 }

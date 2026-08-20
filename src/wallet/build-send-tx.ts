@@ -493,11 +493,54 @@ function buildDraftTx(params: BuildSendTxParams): {
 
 const SIGHASH_ALL = 1;
 
+function u32le(n: number): Uint8Array {
+  return Uint8Array.of(n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff);
+}
+
+/**
+ * Legacy (pre-segwit) SIGHASH_ALL preimage hash, computed from the public
+ * `Transaction` API instead of scure's private `tx.preimageLegacy`: build a
+ * scratch transaction with the same version/lockTime/inputs/outputs, put
+ * `prevOutScript` as the scriptSig for `idx` and empty scriptSig for every
+ * other input (the SIGHASH_ALL rule), then hash its non-witness serialization.
+ * Only used for plain p2pkh scriptPubKeys, which never contain
+ * OP_CODESEPARATOR, so no separate stripping step is needed.
+ */
+function legacySighashAll(
+  tx: Transaction,
+  idx: number,
+  prevOutScript: Uint8Array,
+): Uint8Array {
+  const scratch = new Transaction({ version: tx.version, lockTime: tx.lockTime });
+  for (let i = 0; i < tx.inputsLength; i++) {
+    const input = tx.getInput(i);
+    if (input.txid === undefined || input.index === undefined) {
+      throw new Error("missing outpoint for input");
+    }
+    scratch.addInput(
+      {
+        txid: input.txid,
+        index: input.index,
+        sequence: input.sequence,
+        finalScriptSig: i === idx ? prevOutScript : new Uint8Array(0),
+      },
+      true,
+    );
+  }
+  for (let i = 0; i < tx.outputsLength; i++) {
+    const out = tx.getOutput(i);
+    if (out.script === undefined || out.amount === undefined) {
+      throw new Error("missing output script/amount");
+    }
+    scratch.addOutput({ script: out.script, amount: out.amount }, true);
+  }
+  return sha256x2(scratch.toBytes(true, false), u32le(SIGHASH_ALL));
+}
+
 /** scure `tx.sign` always uses a compressed pubkey; legacy p2pkh needs the 65-byte key. */
 function signWifTx(
   tx: Transaction,
   account: Extract<AccountKey, { kind: "wif" }>,
-  utxos: SendInputUtxo[],
 ): void {
   if (account.publicKey.length === 33) {
     tx.sign(account.privateKey);
@@ -505,17 +548,9 @@ function signWifTx(
   }
   for (let i = 0; i < tx.inputsLength; i++) {
     const input = tx.getInput(i);
-    if (input.txid === undefined || input.index === undefined) {
-      throw new Error("missing outpoint for input");
-    }
-    // selectUTXO may BIP69-reorder inputs; match by outpoint, not array index.
-    const txidHex = hex.encode(input.txid);
-    const utxo = utxos.find(
-      (u) => u.txid === txidHex && u.vout === input.index,
-    );
-    const script = input.witnessUtxo?.script ?? utxo?.scriptPubKey;
+    const script = input.witnessUtxo?.script;
     if (!script) throw new Error("missing UTXO for input");
-    const hash = tx.preimageLegacy(i, script, SIGHASH_ALL);
+    const hash = legacySighashAll(tx, i, script);
     const sig = signECDSA(hash, account.privateKey, true);
     tx.updateInput(
       i,
@@ -541,7 +576,7 @@ export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult 
     throw new Error("signing requires a mnemonic or WIF wallet secret");
   }
   if (account.kind === "wif") {
-    signWifTx(tx, account, params.utxos);
+    signWifTx(tx, account);
   } else {
     for (const path of new Set(signPaths)) {
       tx.sign(privateKeyAtPath(account.key, path));
