@@ -427,6 +427,145 @@ describe("WIF signing (BlueWallet-style + mixed types)", () => {
     const tx = Transaction.fromRaw(hex.decode(built.txHex));
     expect(tx.inputsLength).toBe(1);
     expect(tx.outputsLength).toBe(2);
+    const minFee = BigInt(Math.ceil(1 * built.vsize));
+    expect(built.feeSats).toBeGreaterThanOrEqual(minFee);
+  });
+
+  test("uncompressed send to taproot pays for the larger output", () => {
+    const wallet = deriveWatchWallet(WIF_UNCOMPRESSED);
+    const recv = wallet.addresses[0]!;
+    const fund = fundingTx(recv.scriptPubKey, 100_000n, 45);
+    const built = buildSend({
+      secret: WIF_UNCOMPRESSED,
+      wallet,
+      utxos: [
+        {
+          txid: fund.txid,
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: recv.scriptPubKey,
+          nonWitnessUtxo: fund.tx,
+        },
+      ],
+      toAddress: ADDR_TAPROOT,
+      amountSats: 40_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: recv.address,
+    });
+    expect(built.kind).toBe("signed");
+    if (built.kind !== "signed") throw new Error("expected signed");
+    expect(built.feeSats).toBeGreaterThanOrEqual(
+      BigInt(Math.ceil(1 * built.vsize)),
+    );
+  });
+
+  test("uncompressed self-send still shrinks change when amounts match", () => {
+    const wallet = deriveWatchWallet(WIF_UNCOMPRESSED);
+    const recv = wallet.addresses[0]!;
+    const valueSats = 100_226n;
+    const fund = fundingTx(recv.scriptPubKey, valueSats, 46);
+    const built = buildSend({
+      secret: WIF_UNCOMPRESSED,
+      wallet,
+      utxos: [
+        {
+          txid: fund.txid,
+          vout: 0,
+          valueSats,
+          scriptPubKey: recv.scriptPubKey,
+          nonWitnessUtxo: fund.tx,
+        },
+      ],
+      toAddress: recv.address,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: recv.address,
+    });
+    expect(built.kind).toBe("signed");
+    if (built.kind !== "signed") throw new Error("expected signed");
+    expect(built.feeSats).toBeGreaterThanOrEqual(
+      BigInt(Math.ceil(1 * built.vsize)),
+    );
+  });
+
+  test("uncompressed send uses leftover fee when there is no change", () => {
+    const wallet = deriveWatchWallet(WIF_UNCOMPRESSED);
+    const recv = wallet.addresses[0]!;
+    const fund = fundingTx(recv.scriptPubKey, 100_000n, 42);
+    const built = buildSend({
+      secret: WIF_UNCOMPRESSED,
+      wallet,
+      utxos: [
+        {
+          txid: fund.txid,
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: recv.scriptPubKey,
+          nonWitnessUtxo: fund.tx,
+        },
+      ],
+      toAddress: DEST_LEGACY,
+      amountSats: 99_700n,
+      feeRateSatPerVb: 1,
+      changeAddress: recv.address,
+    });
+    expect(built.kind).toBe("signed");
+    if (built.kind !== "signed") throw new Error("expected signed");
+    const tx = Transaction.fromRaw(hex.decode(built.txHex));
+    expect(tx.outputsLength).toBe(1);
+    expect(built.feeSats).toBeGreaterThanOrEqual(
+      BigInt(Math.ceil(1 * built.vsize)),
+    );
+  });
+
+  test("uncompressed send rejects a change output below Core dust", () => {
+    const wallet = deriveWatchWallet(WIF_UNCOMPRESSED);
+    const recv = wallet.addresses[0]!;
+    const fund = fundingTx(recv.scriptPubKey, 100_000n, 43);
+    expect(() =>
+      buildSend({
+        secret: WIF_UNCOMPRESSED,
+        wallet,
+        utxos: [
+          {
+            txid: fund.txid,
+            vout: 0,
+            valueSats: 100_000n,
+            scriptPubKey: recv.scriptPubKey,
+            nonWitnessUtxo: fund.tx,
+          },
+        ],
+        toAddress: DEST_LEGACY,
+        amountSats: 99_214n,
+        feeRateSatPerVb: 1,
+        changeAddress: recv.address,
+      }),
+    ).toThrow(/insufficient/);
+  });
+
+  test("uncompressed send-max rejects a leftover below Core dust", () => {
+    const wallet = deriveWatchWallet(WIF_UNCOMPRESSED);
+    const recv = wallet.addresses[0]!;
+    const fund = fundingTx(recv.scriptPubKey, 750n, 44);
+    expect(() =>
+      buildSend({
+        secret: WIF_UNCOMPRESSED,
+        wallet,
+        utxos: [
+          {
+            txid: fund.txid,
+            vout: 0,
+            valueSats: 750n,
+            scriptPubKey: recv.scriptPubKey,
+            nonWitnessUtxo: fund.tx,
+          },
+        ],
+        toAddress: DEST_LEGACY,
+        amountSats: "max",
+        feeRateSatPerVb: 1,
+        changeAddress: recv.address,
+      }),
+    ).toThrow(/insufficient/);
   });
 
   // BIP69 (scure default) reorders inputs by txid bytes. Pass UTXOs in the
@@ -480,6 +619,9 @@ describe("WIF signing (BlueWallet-style + mixed types)", () => {
     expect(tx.inputsLength).toBe(2);
     expect(hex.encode(tx.getInput(0).txid!)).toBe(smaller.txid);
     expect(hex.encode(tx.getInput(1).txid!)).toBe(larger.txid);
+    expect(built.feeSats).toBeGreaterThanOrEqual(
+      BigInt(Math.ceil(1 * built.vsize)),
+    );
 
     // Pin the legacy (SIGHASH_ALL) sighash bytes: verify each input's ECDSA
     // signature against a sighash computed independently by bitcoinjs-lib's
