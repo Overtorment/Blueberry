@@ -12,14 +12,22 @@ import type { PlatformNet } from "../net/types.ts";
 import { detachLoop } from "./detach-loop.ts";
 import type { Module, ModuleContext } from "./types.ts";
 
+export type ProbeCallOptions = { wantAddr: boolean };
+
 export type PeersDiscoveryOptions = {
   net: PlatformNet;
   resolveSeeds?: () => Promise<PeerCandidate[]>;
-  probe?: (host: string, port: number) => Promise<ProbeResult>;
+  probe?: (
+    host: string,
+    port: number,
+    options?: ProbeCallOptions,
+  ) => Promise<ProbeResult>;
   concurrency?: number;
   /** How long to wait when there is nothing to probe. */
   idleDelayMs?: number;
   probeTimeoutMs?: number;
+  addrTimeoutMs?: number;
+  crawlIntervalMs?: number;
   now?: () => number;
   /** Re-resolve DNS seeds when alive compact-filter peers drop below this. */
   minAliveCompactFilters?: number;
@@ -40,11 +48,16 @@ export function createPeersDiscoveryModule(
         resolver: options.net.dns,
       }));
   const probeTimeoutMs = options.probeTimeoutMs ?? config.peerProbeTimeoutMs;
+  const addrTimeoutMs = options.addrTimeoutMs ?? config.peerAddrTimeoutMs;
+  const crawlIntervalMs =
+    options.crawlIntervalMs ?? config.peerCrawlIntervalMs;
   const probe =
     options.probe ??
-    ((host, p) =>
+    ((host, p, call) =>
       probePeer(host, p, {
         timeoutMs: probeTimeoutMs,
+        addrTimeoutMs,
+        wantAddr: call?.wantAddr === true,
         connect: options.net.connect,
       }));
   const concurrency = options.concurrency ?? config.peerConcurrency;
@@ -62,6 +75,8 @@ export function createPeersDiscoveryModule(
   let wake: (() => void) | undefined;
   let lastReseedAt = 0;
   let dnsInFlight = false;
+  let lastCrawlAt = Number.NEGATIVE_INFINITY;
+  let crawlInFlight = false;
   const inflight = new Set<string>();
 
   function kick() {
@@ -218,29 +233,42 @@ export function createPeersDiscoveryModule(
         const key = `${next.host}:${next.port}`;
         inflight.add(key);
         spawned++;
+        const wantAddr =
+          !paused &&
+          !crawlInFlight &&
+          now() - lastCrawlAt >= crawlIntervalMs;
+        if (wantAddr) crawlInFlight = true;
         void (async () => {
           try {
-            const result = await probe(next.host, next.port);
+            const result = await probe(next.host, next.port, { wantAddr });
             if (stopped) return;
-            // markProbed / markAlive / new upserts all mutate peer rows.
-            ctx.db.peers.markProbed(next.host, next.port, now());
-            if (result.ok) {
-              ctx.db.peers.upsert({
-                host: next.host,
-                port: next.port,
-                services: result.services,
-                alive: true,
-                usedForBlocks: false,
-                lastProbedAt: now(),
-              });
-              for (const peer of result.peers) upsertCandidate(peer);
-              ctx.db.peers.markAlive(next.host, next.port, true);
-            } else {
+            const probedAt = now();
+            ctx.db.transaction(() => {
+              ctx.db.peers.markProbed(next.host, next.port, probedAt);
+              if (result.ok) {
+                ctx.db.peers.upsert({
+                  host: next.host,
+                  port: next.port,
+                  services: result.services,
+                  alive: true,
+                  usedForBlocks: false,
+                  lastProbedAt: probedAt,
+                });
+                for (const peer of result.peers) upsertCandidate(peer);
+                ctx.db.peers.markAlive(next.host, next.port, true);
+              } else {
+                ctx.db.peers.markAlive(next.host, next.port, false);
+              }
+            });
+            if (!result.ok) {
               log(
                 "peers-discovery",
                 `probe fail ${key} error=${result.error}`,
               );
-              ctx.db.peers.markAlive(next.host, next.port, false);
+            }
+            if (wantAddr) {
+              const n = result.ok ? result.peers.length : 0;
+              log("peers-discovery", `crawl source=${key} addrs=${n}`);
             }
             emitUpdated();
           } catch (err) {
@@ -250,6 +278,10 @@ export function createPeersDiscoveryModule(
             ctx.db.peers.markAlive(next.host, next.port, false);
             emitUpdated();
           } finally {
+            if (wantAddr) {
+              crawlInFlight = false;
+              lastCrawlAt = now();
+            }
             if (stopped) return;
             inflight.delete(key);
             emitSockets();

@@ -5,6 +5,8 @@ describe("config", () => {
   test("exposes fixed app settings", () => {
     expect(config).toEqual({
       peerProbeTimeoutMs: 3_000,
+      peerAddrTimeoutMs: 3_000,
+      peerCrawlIntervalMs: 15_000,
       headerSyncTimeoutMs: 30_000,
       headerRacePeers: 10,
       peerConcurrency: 30,

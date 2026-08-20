@@ -7,6 +7,17 @@ export const config = {
    */
   peerProbeTimeoutMs: 3_000,
   /**
+   * After a good handshake, how long to wait for addr/addrv2 during a crawl
+   * probe. Handshake success does not use this budget. Too low misses dumps;
+   * too high holds one crawl socket.
+   */
+  peerAddrTimeoutMs: 3_000,
+  /**
+   * Minimum time between getaddr crawl attempts. Discovery runs at most one
+   * crawl at a time. Too low chatters; too high grows the book slowly.
+   */
+  peerCrawlIntervalMs: 15_000,
+  /**
    * After a peer is live, how long to wait for a getheaders reply while syncing
    * the block header chain. Pair with headerRacePeers: several peers race the
    * same locator, and this is each one’s response budget. Too low causes needless
