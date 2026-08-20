@@ -34,6 +34,10 @@ const ADDR_P2SH = "3CKN8HTCews4rYJYsyub5hjAVm5g5VFdQJ";
 const WIF_TAPROOT = "L4PKRVk1Peaar5WuH5LiKfkTygWtFfGrFeH2g2t3YVVqiwpJjMoF";
 const ADDR_TAPROOT = "bc1pm6lqlel3qxefsx0v39nshtghasvvp6ghn3e5hd5q280j5m9h7csqrkzssu";
 
+const WIF_UNCOMPRESSED =
+  "5KN7MzqK5wt2TP1fQCYyHBtDrXdJuXbUzm4A9rKAteGu3Qi5CVR";
+const ADDR_UNCOMPRESSED = "1Jq6MksXQVWzrznvZzxkV6oY57oWXD9TXB";
+
 const DEST_LEGACY = "1GX36PGBUrF8XahZEGQqHqnJGW2vCZteoB";
 
 function byType(
@@ -127,6 +131,26 @@ describe("deriveWatchWallet WIF (BlueWallet address vectors)", () => {
     expect(a.addresses.map((x) => x.address)).toEqual(
       b.addresses.map((x) => x.address),
     );
+  });
+});
+
+describe("deriveWatchWallet uncompressed WIF", () => {
+  test("watches only uncompressed legacy p2pkh", () => {
+    const w = deriveWatchWallet(WIF_UNCOMPRESSED);
+    expect(w.kind).toBe("wif");
+    expect(w.addresses).toHaveLength(1);
+    expect(w.scripts).toHaveLength(1);
+    expect(w.addresses[0]?.scriptType).toBe("p2pkh");
+    expect(w.addresses[0]?.address).toBe(ADDR_UNCOMPRESSED);
+  });
+});
+
+describe("preferredWifReceiveAddress uncompressed", () => {
+  test("defaults to the sole p2pkh when no txs", () => {
+    const w = deriveWatchWallet(WIF_UNCOMPRESSED);
+    const addr = preferredWifReceiveAddress(w, []);
+    expect(addr.scriptType).toBe("p2pkh");
+    expect(addr.address).toBe(ADDR_UNCOMPRESSED);
   });
 });
 

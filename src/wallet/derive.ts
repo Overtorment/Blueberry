@@ -11,7 +11,7 @@ import type {
 } from "./types.ts";
 import {
   BIP84_ZPUB_VERSIONS,
-  decodeWifPrivateKey,
+  decodeWif,
   parseWalletSecret,
 } from "./secret.ts";
 import { watchAddressScriptType } from "./is-address-valid.ts";
@@ -45,10 +45,31 @@ function normalizeGaps(gaps?: number | WatchGaps): WatchGaps {
 }
 
 function deriveWifWatchWallet(wif: string): WatchWallet {
-  const priv = decodeWifPrivateKey(wif);
-  const publicKey = secp256k1.getPublicKey(priv, true);
-  const xOnly = publicKey.slice(1);
+  const { privateKey, compressed } = decodeWif(wif);
+  const publicKey = secp256k1.getPublicKey(privateKey, compressed);
 
+  if (!compressed) {
+    const pay = p2pkh(publicKey);
+    if (!pay.address) {
+      throw new Error("failed to encode p2pkh address from WIF");
+    }
+    const addr: WatchAddress = {
+      path: "wif/p2pkh",
+      index: 0,
+      change: false,
+      address: pay.address,
+      scriptPubKey: new Uint8Array(pay.script),
+      scriptType: "p2pkh",
+    };
+    return {
+      kind: "wif",
+      secret: wif,
+      addresses: [addr],
+      scripts: [addr.scriptPubKey],
+    };
+  }
+
+  const xOnly = publicKey.slice(1);
   const payments: Record<
     AddressScriptType,
     { address?: string; script: Uint8Array }

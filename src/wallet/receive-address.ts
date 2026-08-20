@@ -58,7 +58,11 @@ export function preferredWifReceiveAddress(
     wallet.addresses.map((a) => [scriptHex(a.scriptPubKey), a]),
   );
   const native = wallet.addresses.find((a) => a.scriptType === "p2wpkh");
-  if (!native) throw new Error("WIF wallet missing native segwit address");
+  const fallback =
+    native ??
+    wallet.addresses.find((a) => a.scriptType === "p2pkh") ??
+    wallet.addresses[0];
+  if (!fallback) throw new Error("WIF wallet missing receive address");
 
   const decodedRows = txs.map((row) => ({
     ...row,
@@ -93,5 +97,5 @@ export function preferredWifReceiveAddress(
       }
     }
   }
-  return native;
+  return fallback;
 }
