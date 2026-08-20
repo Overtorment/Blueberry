@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { isBip38Key } from "../../src/wallet/bip38.ts";
 import {
+  decodeWif,
   inspectWalletSecret,
   parseWalletSecret,
 } from "../../src/wallet/secret.ts";
@@ -35,6 +36,15 @@ describe("isBip38Key", () => {
     expect(isBip38Key(MNEMONIC)).toBe(false);
     expect(isBip38Key(ADDR)).toBe(false);
     expect(isBip38Key("6Pshort")).toBe(false);
+  });
+});
+
+describe("decodeWif", () => {
+  test("marks 5… uncompressed and K/L compressed", () => {
+    const raw = decodeWif(WIF_UNCOMPRESSED);
+    expect(raw.compressed).toBe(false);
+    expect(raw.privateKey.length).toBe(32);
+    expect(decodeWif(WIF_COMPRESSED).compressed).toBe(true);
   });
 });
 

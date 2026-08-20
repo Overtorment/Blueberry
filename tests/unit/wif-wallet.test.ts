@@ -69,11 +69,18 @@ describe("parseWalletSecret WIF", () => {
     expect(parseWalletSecret(WIF_TAPROOT).kind).toBe("wif");
   });
 
-  test("rejects uncompressed and garbage as WIF", () => {
-    // BlueWallet uncompressed legacy WIF — we require compressed for 4-type unwrap
-    expect(() =>
-      parseWalletSecret("5JqSfbkoVDrzM5i7PH7939G5fwWVDWmnFTSMbVctAmet3tYMq2S"),
-    ).toThrow(/compressed|WIF/i);
+  test("accepts uncompressed mainnet WIF", () => {
+    expect(
+      parseWalletSecret(
+        "5KN7MzqK5wt2TP1fQCYyHBtDrXdJuXbUzm4A9rKAteGu3Qi5CVR",
+      ),
+    ).toEqual({
+      kind: "wif",
+      value: "5KN7MzqK5wt2TP1fQCYyHBtDrXdJuXbUzm4A9rKAteGu3Qi5CVR",
+    });
+  });
+
+  test("rejects garbage as WIF", () => {
     expect(() => parseWalletSecret("KnotAValidWifKeyxxxxxxxxxxx")).toThrow();
   });
 
