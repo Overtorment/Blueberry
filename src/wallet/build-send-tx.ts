@@ -504,9 +504,18 @@ function signWifTx(
     return;
   }
   for (let i = 0; i < tx.inputsLength; i++) {
-    const utxo = utxos[i];
-    if (!utxo) throw new Error("missing UTXO for input");
-    const hash = tx.preimageLegacy(i, utxo.scriptPubKey, SIGHASH_ALL);
+    const input = tx.getInput(i);
+    if (input.txid === undefined || input.index === undefined) {
+      throw new Error("missing outpoint for input");
+    }
+    // selectUTXO may BIP69-reorder inputs; match by outpoint, not array index.
+    const txidHex = hex.encode(input.txid);
+    const utxo = utxos.find(
+      (u) => u.txid === txidHex && u.vout === input.index,
+    );
+    const script = input.witnessUtxo?.script ?? utxo?.scriptPubKey;
+    if (!script) throw new Error("missing UTXO for input");
+    const hash = tx.preimageLegacy(i, script, SIGHASH_ALL);
     const sig = signECDSA(hash, account.privateKey, true);
     tx.updateInput(
       i,
