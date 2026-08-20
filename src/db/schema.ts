@@ -79,5 +79,21 @@ export function ensureSchema(raw: BunDatabase): void {
       ON filters(height, block_hash_internal_hex);
     CREATE INDEX IF NOT EXISTS peers_alive_used
       ON peers(alive, used_for_blocks);
+    CREATE INDEX IF NOT EXISTS peers_probe_queue
+      ON peers(
+        CASE WHEN last_probed_at IS NULL THEN 0 ELSE 1 END,
+        last_probed_at,
+        CASE WHEN instr(host, ':') > 0 THEN 1 ELSE 0 END,
+        host,
+        port
+      );
+    CREATE INDEX IF NOT EXISTS peers_service_queue
+      ON peers(
+        alive DESC,
+        CASE WHEN last_probed_at IS NULL THEN 0 ELSE 1 END,
+        last_probed_at,
+        host,
+        port
+      );
   `);
 }

@@ -70,7 +70,7 @@ describe("SqliteDatabase peers", () => {
     db.close();
   });
 
-  test("conflict upsert refreshes services without clearing flags", () => {
+  test("gossip cannot replace services verified by a probe", () => {
     const db = createSqliteDatabase(":memory:");
     db.peers.upsert(basePeer({ services: 1n }));
     db.peers.markAlive("1.2.3.4", 8333, true);
@@ -85,11 +85,23 @@ describe("SqliteDatabase peers", () => {
     );
     expect(db.peers.count()).toBe(1);
     expect(db.peers.list()[0]).toMatchObject({
-      services: 9n,
+      services: 1n,
       alive: true,
       lastProbedAt: 42,
       usedForBlocks: false,
     });
+    db.close();
+  });
+
+  test("unprobed hints and verified probes can refresh services", () => {
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert(basePeer({ services: 1n }));
+    db.peers.upsert(basePeer({ services: 9n }));
+    expect(db.peers.list()[0]?.services).toBe(9n);
+
+    db.peers.markProbed("1.2.3.4", 8333, 42);
+    db.peers.upsert(basePeer({ services: 64n, lastProbedAt: 42 }));
+    expect(db.peers.list()[0]?.services).toBe(64n);
     db.close();
   });
 

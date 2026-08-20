@@ -797,4 +797,148 @@ describe("peers-discovery", () => {
     await mod.stop();
     db.close();
   });
+
+  test("only one crawl probe at a time; interval gates the next", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 0n,
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+    db.peers.upsert({
+      host: "2.2.2.2",
+      port: 8333,
+      services: 0n,
+      alive: false,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    let t = 0;
+    const flags: boolean[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        now: () => t,
+        crawlIntervalMs: 15_000,
+        probeTimeoutMs: 0,
+        concurrency: 2,
+        idleDelayMs: 20,
+        minAliveCompactFilters: 0,
+        probe: async (_host, _port, options) => {
+          const want = options?.wantAddr === true;
+          flags.push(want);
+          if (want) await gate;
+          return { ok: false, error: "skip" };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => flags.length >= 2);
+    expect(flags.filter((f) => f).length).toBe(1);
+    release();
+    await waitFor(() => flags.length >= 3);
+    expect(flags.filter((f) => f).length).toBe(1);
+    t = 15_000;
+    await waitFor(() => flags.filter((f) => f).length >= 2);
+    await mod.stop();
+    db.close();
+  });
+
+  test("logs crawl source and addr count", async () => {
+    const file = openTempFileLog();
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "8.8.8.8",
+      port: 8333,
+      services: 0n,
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        concurrency: 1,
+        idleDelayMs: 50,
+        minAliveCompactFilters: 0,
+        crawlIntervalMs: 15_000,
+        probe: async (_host, _port, options) => {
+          if (options?.wantAddr) {
+            return {
+              ok: true,
+              services: 64n,
+              peers: [{ host: "9.9.9.9", port: 8333, services: 1033n }],
+            };
+          }
+          return { ok: false, error: "skip" };
+        },
+      },
+    );
+
+    await mod.start();
+    await waitFor(() => db.peers.list().some((p) => p.host === "9.9.9.9"));
+    await mod.stop();
+    const text = file.read();
+    file.close();
+    db.close();
+    expect(text).toContain(
+      "[peers-discovery] crawl source=8.8.8.8:8333 addrs=1",
+    );
+  });
+
+  test("sync:idle does not start a crawl", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    db.peers.upsert({
+      host: "1.1.1.1",
+      port: 8333,
+      services: 0n,
+      alive: true,
+      usedForBlocks: false,
+      lastProbedAt: null,
+    });
+
+    const flags: boolean[] = [];
+    const mod = createPeersDiscoveryModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        resolveSeeds: async () => [],
+        concurrency: 1,
+        idleDelayMs: 20,
+        probeTimeoutMs: 0,
+        minAliveCompactFilters: 0,
+        crawlIntervalMs: 1,
+        probe: async (_host, _port, options) => {
+          flags.push(options?.wantAddr === true);
+          return { ok: true, peers: [], services: 0n };
+        },
+      },
+    );
+    await mod.start();
+    await waitFor(() => flags.length >= 1);
+    const beforeIdle = flags.length;
+    expect(flags.slice(0, beforeIdle)).toContain(true);
+    bus.emit("sync:idle", { at: Date.now() });
+    await new Promise((r) => setTimeout(r, 80));
+    expect(flags.slice(beforeIdle).filter(Boolean)).toEqual([]);
+    await mod.stop();
+    db.close();
+  });
 });
