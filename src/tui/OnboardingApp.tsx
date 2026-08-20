@@ -3,12 +3,17 @@ import { useMemo, useState } from "react";
 import { DEFAULT_CHECKPOINT_YEAR } from "../checkpoint.ts";
 import { listCheckpointYears } from "../sync-year.ts";
 import { generateMnemonic12 } from "../wallet/generate-mnemonic.ts";
-import { parseWalletSecret } from "../wallet/secret.ts";
 import { BlueberryArt } from "./components/BlueberryArt.tsx";
 import { Panel } from "./chrome.tsx";
+import {
+  classifyOnboardingSecret,
+  maskPassword,
+  nextPasswordFromMaskedInput,
+  unlockBip38Secret,
+} from "./onboarding-import.ts";
 import { THEME } from "./theme.ts";
 
-type Step = "choose" | "import" | "create" | "year";
+type Step = "choose" | "import" | "bip38-password" | "create" | "year";
 
 export type OnboardingAppProps = {
   /** Secret already in KV — skip wallet step. */
@@ -72,6 +77,8 @@ export function OnboardingApp({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [mnemonic, setMnemonic] = useState<string | null>(null);
+  const [encryptedBip38, setEncryptedBip38] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
   const options = useMemo(
     () =>
       listCheckpointYears().map((year) => ({
@@ -88,14 +95,41 @@ export function OnboardingApp({
 
   function submitSecret(raw: string) {
     try {
-      parseWalletSecret(raw);
+      const next = classifyOnboardingSecret(raw);
+      if (next.action === "bip38") {
+        setEncryptedBip38(next.encrypted);
+        setPassword("");
+        setError(null);
+        setStep("bip38-password");
+        return;
+      }
+      setError(null);
+      onSecretValidated(next.secret);
+      setStep("year");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function submitBip38Password() {
+    if (busy || !encryptedBip38) return;
+    if (!password.trim()) {
+      setError("password is required");
       return;
     }
+    setBusy(true);
     setError(null);
-    onSecretValidated(raw);
-    setStep("year");
+    try {
+      const wif = await unlockBip38Secret(encryptedBip38, password);
+      setPassword("");
+      setEncryptedBip38(null);
+      onSecretValidated(wif);
+      setStep("year");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
   function confirmYear(index: number) {
@@ -124,6 +158,10 @@ export function OnboardingApp({
       if (step === "create") {
         setMnemonic(null);
         setStep("choose");
+      } else if (step === "bip38-password") {
+        setPassword("");
+        setError(null);
+        setStep("import");
       } else if (step === "import") {
         setValue("");
         setError(null);
@@ -184,7 +222,7 @@ export function OnboardingApp({
         <box width="80%" height={8} flexGrow={0}>
           <Panel title="Import" state="active" accent="magenta" height="100%">
             <text fg={THEME.fgDim}>
-              Enter BIP39 seed, account zpub, WIF private key, or address
+              Enter BIP39 seed, account zpub, WIF (or password-protected WIF), or address
             </text>
             <input
               focused
@@ -198,6 +236,33 @@ export function OnboardingApp({
             />
             <text fg={error ? THEME.accentMagenta : THEME.fgDim}>
               {error ?? "Enter to continue · Esc to go back"}
+            </text>
+          </Panel>
+        </box>
+      ) : null}
+
+      {step === "bip38-password" ? (
+        <box width="80%" height={8} flexGrow={0}>
+          <Panel title="Password" state="active" accent="magenta" height="100%">
+            <text fg={THEME.fgDim}>
+              This WIF is password-protected. Enter the password.
+            </text>
+            <input
+              focused={!busy}
+              value={maskPassword(password)}
+              placeholder="password…"
+              onInput={(v) => {
+                setPassword((prev) => nextPasswordFromMaskedInput(prev, v));
+                if (error) setError(null);
+              }}
+              onSubmit={() => {
+                void submitBip38Password();
+              }}
+            />
+            <text fg={error ? THEME.accentMagenta : THEME.fgDim}>
+              {busy
+                ? "Decrypting…"
+                : (error ?? "Enter to continue · Esc to go back")}
             </text>
           </Panel>
         </box>

@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import {
+  classifyOnboardingSecret,
+  maskPassword,
+  nextPasswordFromMaskedInput,
+  unlockBip38Secret,
+} from "../../src/tui/onboarding-import.ts";
 import { decryptBip38ToWif, isBip38Key } from "../../src/wallet/bip38.ts";
 import { deriveWatchWallet } from "../../src/wallet/derive.ts";
 import {
@@ -119,5 +125,48 @@ describe("decrypt then derive", () => {
     expect(w.addresses).toHaveLength(1);
     expect(w.addresses[0]?.scriptType).toBe("p2pkh");
     expect(w.addresses[0]?.address).toBe(ADDR);
+  });
+});
+
+describe("classifyOnboardingSecret", () => {
+  test("sends 6P keys to the password step", () => {
+    expect(classifyOnboardingSecret(`  ${BIP38_FAST}  `)).toEqual({
+      action: "bip38",
+      encrypted: BIP38_FAST,
+    });
+  });
+
+  test("accepts a raw WIF without a password step", () => {
+    expect(classifyOnboardingSecret(WIF_UNCOMPRESSED)).toEqual({
+      action: "save",
+      secret: WIF_UNCOMPRESSED,
+    });
+  });
+
+  test("still rejects junk", () => {
+    expect(() => classifyOnboardingSecret("not-a-secret")).toThrow();
+  });
+});
+
+describe("unlockBip38Secret", () => {
+  test("rejects an empty password", async () => {
+    await expect(unlockBip38Secret(BIP38_FAST, "   ")).rejects.toThrow(
+      /password is required/i,
+    );
+  });
+
+  test("returns the plain WIF", async () => {
+    await expect(
+      unlockBip38Secret(BIP38_FAST, FAST_PASSWORD, FAST_SCRYPT),
+    ).resolves.toBe(WIF_UNCOMPRESSED);
+  });
+});
+
+describe("masked password input", () => {
+  test("masks to stars and applies edits", () => {
+    expect(maskPassword("ab")).toBe("**");
+    expect(nextPasswordFromMaskedInput("ab", "***")).toBe("ab*");
+    expect(nextPasswordFromMaskedInput("ab", "*")).toBe("a");
+    expect(nextPasswordFromMaskedInput("ab", "xyz")).toBe("xyz");
   });
 });
