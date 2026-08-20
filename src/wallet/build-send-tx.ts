@@ -266,6 +266,69 @@ function applyFractionalFee(
   return selectedFee;
 }
 
+/**
+ * scure sizes p2pkh as if the pubkey were 33 bytes, and it reports a
+ * change-output weight even when it omits change. Size the real legacy
+ * shape (65-byte pub, 72-byte sig) and use the fee already in the tx.
+ * Size outputs from the real scripts (dest may not be p2pkh).
+ * If that is short, take the rest from change (or the max output).
+ * Do not leave a p2pkh output below Bitcoin Core's default dust (546).
+ */
+const CORE_P2PKH_DUST_SATS = 546n;
+
+function uncompressedP2pkhVsize(tx: Transaction): number {
+  // version + locktime + compactSize(vin) + compactSize(vout)
+  let bytes = 10 + 180 * tx.inputsLength;
+  for (let i = 0; i < tx.outputsLength; i++) {
+    const script = tx.getOutput(i).script;
+    if (!script) throw new Error("missing output script");
+    bytes += 8 + 1 + script.length;
+  }
+  return bytes;
+}
+
+function applyUncompressedP2pkhFee(
+  tx: Transaction,
+  params: BuildSendTxParams,
+): { feeSats: bigint; vsize: number } {
+  const vsize = uncompressedP2pkhVsize(tx);
+  const neededFee = BigInt(Math.ceil(params.feeRateSatPerVb * vsize));
+  const actualFee = tx.fee;
+  if (actualFee >= neededFee) return { feeSats: actualFee, vsize };
+  const shortfall = neededFee - actualFee;
+  const changeAddress =
+    params.amountSats === "max" ? params.toAddress : params.changeAddress;
+  const paymentAmount =
+    params.amountSats !== "max" &&
+    addressesEqual(params.toAddress, params.changeAddress)
+      ? params.amountSats
+      : undefined;
+  let skippedPayment = false;
+  for (let i = 0; i < tx.outputsLength; i++) {
+    if (!addressesEqual(tx.getOutputAddress(i), changeAddress)) continue;
+    const out = tx.getOutput(i);
+    if (out.amount === undefined) continue;
+    if (
+      paymentAmount !== undefined &&
+      out.amount === paymentAmount &&
+      !skippedPayment
+    ) {
+      skippedPayment = true;
+      continue;
+    }
+    if (out.amount <= shortfall) {
+      throw new Error("insufficient funds for amount and fee");
+    }
+    const remaining = out.amount - shortfall;
+    if (remaining < CORE_P2PKH_DUST_SATS) {
+      throw new Error("insufficient funds for amount and fee");
+    }
+    tx.updateOutput(i, { amount: remaining });
+    return { feeSats: neededFee, vsize };
+  }
+  throw new Error("insufficient funds for amount and fee");
+}
+
 function selectSendTx(
   inputs: Parameters<typeof selectUTXO>[0],
   params: BuildSendTxParams,
@@ -487,7 +550,10 @@ function buildDraftTx(params: BuildSendTxParams): {
       tx.addOutput(selected.tx.getOutput(i));
     }
   }
-  const { feeSats, vsize } = selected;
+  let { feeSats, vsize } = selected;
+  if (account.kind === "wif" && account.publicKey.length === 65) {
+    ({ feeSats, vsize } = applyUncompressedP2pkhFee(tx, params));
+  }
   return { tx, signPaths, account, feeSats, vsize };
 }
 
