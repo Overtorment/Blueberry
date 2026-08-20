@@ -1,7 +1,8 @@
 import { HDKey } from "@scure/bip32";
 import { validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english";
-import { WIF } from "@scure/btc-signer";
+import { base58check } from "@scure/base";
+import { createHash } from "node:crypto";
 import { isBip38Key } from "./bip38.ts";
 import {
   isAddressValid,
@@ -19,9 +20,42 @@ export const WALLET_SECRET_KEY = "wallet_secret";
 /** BIP32 depth of m/84'/0'/0' */
 const ACCOUNT_DEPTH = 3;
 
-const wifCodec = WIF();
+function sha256(data: Uint8Array): Uint8Array {
+  return new Uint8Array(createHash("sha256").update(data).digest());
+}
 
-export type WalletSecretKind = "mnemonic" | "zpub" | "wif" | "address";
+const wifB58 = base58check(sha256);
+
+export function decodeWif(wif: string): {
+  privateKey: Uint8Array;
+  compressed: boolean;
+} {
+  const value = wif.trim();
+  if (!value) throw new Error("invalid WIF");
+  if (value.startsWith("c") || value.startsWith("9")) {
+    throw new Error("only mainnet WIF is supported (not testnet)");
+  }
+  let parsed: Uint8Array;
+  try {
+    parsed = wifB58.decode(value);
+  } catch {
+    throw new Error("invalid WIF");
+  }
+  if (parsed[0] !== 0x80) {
+    throw new Error("only mainnet WIF is supported (not testnet)");
+  }
+  if (parsed.length === 33) {
+    return { privateKey: parsed.subarray(1), compressed: false };
+  }
+  if (parsed.length === 34 && parsed[33] === 0x01) {
+    return { privateKey: parsed.subarray(1, 33), compressed: true };
+  }
+  throw new Error("invalid WIF");
+}
+
+export function decodeWifPrivateKey(wif: string): Uint8Array {
+  return decodeWif(wif).privateKey;
+}
 
 export type ParsedWalletSecret = {
   kind: WalletSecretKind;
@@ -53,25 +87,7 @@ function looksLikeAddressCandidate(value: string): boolean {
   );
 }
 
-/**
- * Decode mainnet compressed WIF → 32-byte private key.
- * Rejects uncompressed (`5…` / `9…`) and testnet (`c…` / `9…`).
- */
-export function decodeWifPrivateKey(wif: string): Uint8Array {
-  const value = wif.trim();
-  if (!value) throw new Error("invalid WIF");
-  if (value.startsWith("c") || value.startsWith("9")) {
-    throw new Error("only mainnet compressed WIF is supported (not testnet)");
-  }
-  if (value.startsWith("5")) {
-    throw new Error("uncompressed WIF is not supported; use compressed WIF");
-  }
-  try {
-    return wifCodec.decode(value);
-  } catch {
-    throw new Error("invalid WIF");
-  }
-}
+export type WalletSecretKind = "mnemonic" | "zpub" | "wif" | "address";
 
 export function parseWalletSecret(raw: string): ParsedWalletSecret {
   const value = raw.trim();
