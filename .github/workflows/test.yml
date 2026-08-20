@@ -26,7 +26,7 @@ jobs:
   test-integration:
     name: Integration tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -38,4 +38,16 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Run integration tests
-        run: bun run test:integration
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Integration attempt ${attempt}/3"
+            if bun run test:integration; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Attempt ${attempt} failed; waiting 30s before retry"
+              sleep 30
+            fi
+          done
+          exit 1

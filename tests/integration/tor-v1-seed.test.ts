@@ -16,14 +16,37 @@ import {
   isSanePeerVersion,
 } from "../../src/net/v1-p2p.ts";
 import { withTorDialRetries } from "../../src/modules/broadcast/tor-dial-policy.ts";
-import { createTorByteDuplexDialer } from "../../src/modules/broadcast/tor-byte-duplex.ts";
+import {
+  createTorByteDuplexDialer,
+  type TorByteDuplexDialerOptions,
+} from "../../src/modules/broadcast/tor-byte-duplex.ts";
 
-const OVERALL_MS = 300_000;
-const CYCLE_MS = 90_000;
-const PER_PEER_MS = 30_000;
-const MAX_PEERS = 20;
+const IS_CI = process.env.CI === "true";
+
+const OVERALL_MS = IS_CI ? 240_000 : 300_000;
+const CYCLE_MS = IS_CI ? 70_000 : 90_000;
+const PER_PEER_MS = IS_CI ? 15_000 : 30_000;
+const MAX_PEERS = IS_CI ? 40 : 20;
 const DIALER_ATTEMPTS = 3;
+const DIALER_BACKOFF_MS = 1_500;
 const PORT = 8333;
+
+const TOR_DIALER_OPTIONS: TorByteDuplexDialerOptions = IS_CI
+  ? {
+      circuitAttempts: 4,
+      circuitRace: 3,
+      extendTimeoutMs: 20_000,
+    }
+  : {};
+
+function shuffle<T>(items: readonly T[]): T[] {
+  const out = items.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j]!, out[i]!];
+  }
+  return out;
+}
 
 describe("integration: Tor exit Bitcoin P2P v1", () => {
   test(
@@ -39,13 +62,13 @@ describe("integration: Tor exit Bitcoin P2P v1", () => {
       const errors: string[] = [];
 
       await withTorDialRetries(
-        () => createTorByteDuplexDialer(),
+        () => createTorByteDuplexDialer(TOR_DIALER_OPTIONS),
         async (dial, signal) => {
           const cycle = AbortSignal.any([
             signal,
             AbortSignal.timeout(CYCLE_MS),
           ]);
-          for (const peer of peers.slice(0, MAX_PEERS)) {
+          for (const peer of shuffle(peers).slice(0, MAX_PEERS)) {
             if (cycle.aborted) break;
             const peerSignal = AbortSignal.any([
               cycle,
@@ -90,7 +113,7 @@ describe("integration: Tor exit Bitcoin P2P v1", () => {
         },
         {
           attempts: DIALER_ATTEMPTS,
-          backoffMs: 1_500,
+          backoffMs: DIALER_BACKOFF_MS,
           signal: overall,
         },
       );
