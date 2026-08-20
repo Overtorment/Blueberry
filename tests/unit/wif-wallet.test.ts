@@ -427,4 +427,52 @@ describe("WIF signing (BlueWallet-style + mixed types)", () => {
     expect(tx.inputsLength).toBe(1);
     expect(tx.outputsLength).toBe(2);
   });
+
+  // BIP69 (scure default) reorders inputs by txid bytes. Pass UTXOs in the
+  // opposite order so index-based signing would bind the wrong prevout.
+  test("signs two uncompressed p2pkh UTXOs after BIP69 reorder", () => {
+    const wallet = deriveWatchWallet(WIF_UNCOMPRESSED);
+    const recv = wallet.addresses[0]!;
+    // salt 1 txid bytes > salt 2; BIP69 puts salt-2 funding first
+    const larger = fundingTx(recv.scriptPubKey, 80_000n, 1);
+    const smaller = fundingTx(recv.scriptPubKey, 80_000n, 2);
+    expect(
+      Buffer.compare(
+        Buffer.from(larger.txid, "hex"),
+        Buffer.from(smaller.txid, "hex"),
+      ),
+    ).toBeGreaterThan(0);
+
+    const built = buildSend({
+      secret: WIF_UNCOMPRESSED,
+      wallet,
+      utxos: [
+        {
+          txid: larger.txid,
+          vout: 0,
+          valueSats: 80_000n,
+          scriptPubKey: recv.scriptPubKey,
+          nonWitnessUtxo: larger.tx,
+        },
+        {
+          txid: smaller.txid,
+          vout: 0,
+          valueSats: 80_000n,
+          scriptPubKey: recv.scriptPubKey,
+          nonWitnessUtxo: smaller.tx,
+        },
+      ],
+      toAddress: DEST_LEGACY,
+      amountSats: 100_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: recv.address,
+    });
+    expect(built.kind).toBe("signed");
+    if (built.kind !== "signed") throw new Error("expected signed");
+    const tx = Transaction.fromRaw(hex.decode(built.txHex));
+    expect(tx.isFinal).toBe(true);
+    expect(tx.inputsLength).toBe(2);
+    expect(hex.encode(tx.getInput(0).txid!)).toBe(smaller.txid);
+    expect(hex.encode(tx.getInput(1).txid!)).toBe(larger.txid);
+  });
 });
