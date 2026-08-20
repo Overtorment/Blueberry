@@ -11,12 +11,12 @@ import {
   selectUTXO,
   Transaction,
 } from "@scure/btc-signer";
-import { sha256x2 } from "@scure/btc-signer/utils";
+import { concatBytes, sha256x2, signECDSA } from "@scure/btc-signer/utils";
 import { scriptHex } from "../parse/extract.ts";
 import { isAddressValid } from "./is-address-valid.ts";
 import {
   BIP84_ZPUB_VERSIONS,
-  decodeWifPrivateKey,
+  decodeWif,
   parseWalletSecret,
 } from "./secret.ts";
 import type { AddressScriptType, WatchAddress, WatchWallet } from "./types.ts";
@@ -119,11 +119,11 @@ type AccountKey =
 function accountKey(secret: string): AccountKey {
   const parsed = parseWalletSecret(secret);
   if (parsed.kind === "wif") {
-    const privateKey = decodeWifPrivateKey(parsed.value);
+    const { privateKey, compressed } = decodeWif(parsed.value);
     return {
       kind: "wif",
       privateKey,
-      publicKey: secp256k1.getPublicKey(privateKey, true),
+      publicKey: secp256k1.getPublicKey(privateKey, compressed),
     };
   }
   if (parsed.kind === "mnemonic") {
@@ -491,6 +491,38 @@ function buildDraftTx(params: BuildSendTxParams): {
   return { tx, signPaths, account, feeSats, vsize };
 }
 
+const SIGHASH_ALL = 1;
+
+/** scure `tx.sign` always uses a compressed pubkey; legacy p2pkh needs the 65-byte key. */
+function signWifTx(
+  tx: Transaction,
+  account: Extract<AccountKey, { kind: "wif" }>,
+  utxos: SendInputUtxo[],
+): void {
+  if (account.publicKey.length === 33) {
+    tx.sign(account.privateKey);
+    return;
+  }
+  for (let i = 0; i < tx.inputsLength; i++) {
+    const utxo = utxos[i];
+    if (!utxo) throw new Error("missing UTXO for input");
+    const hash = tx.preimageLegacy(i, utxo.scriptPubKey, SIGHASH_ALL);
+    const sig = signECDSA(hash, account.privateKey, true);
+    tx.updateInput(
+      i,
+      {
+        partialSig: [
+          [
+            account.publicKey,
+            concatBytes(sig, new Uint8Array([SIGHASH_ALL])),
+          ],
+        ],
+      },
+      true,
+    );
+  }
+}
+
 /**
  * Build and sign a mainnet send. Requires a mnemonic or WIF secret.
  */
@@ -500,7 +532,7 @@ export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult 
     throw new Error("signing requires a mnemonic or WIF wallet secret");
   }
   if (account.kind === "wif") {
-    tx.sign(account.privateKey);
+    signWifTx(tx, account, params.utxos);
   } else {
     for (const path of new Set(signPaths)) {
       tx.sign(privateKeyAtPath(account.key, path));

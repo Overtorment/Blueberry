@@ -399,4 +399,32 @@ describe("WIF signing (BlueWallet-style + mixed types)", () => {
       }),
     ).toThrow(/nonWitnessUtxo|legacy/i);
   });
+
+  test("signs uncompressed legacy p2pkh", () => {
+    const wallet = deriveWatchWallet(WIF_UNCOMPRESSED);
+    const recv = wallet.addresses[0]!;
+    const fund = fundingTx(recv.scriptPubKey, 100_000n, 41);
+    const built = buildSend({
+      secret: WIF_UNCOMPRESSED,
+      wallet,
+      utxos: [
+        {
+          txid: fund.txid,
+          vout: 0,
+          valueSats: 100_000n,
+          scriptPubKey: recv.scriptPubKey,
+          nonWitnessUtxo: fund.tx,
+        },
+      ],
+      toAddress: DEST_LEGACY,
+      amountSats: 40_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: recv.address,
+    });
+    expect(built.kind).toBe("signed");
+    if (built.kind !== "signed") throw new Error("expected signed");
+    const tx = Transaction.fromRaw(hex.decode(built.txHex));
+    expect(tx.inputsLength).toBe(1);
+    expect(tx.outputsLength).toBe(2);
+  });
 });
