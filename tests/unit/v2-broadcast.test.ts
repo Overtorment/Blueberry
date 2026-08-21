@@ -13,6 +13,7 @@ import {
 } from "bip324";
 import { broadcastTxV2 } from "../../src/modules/broadcast/v2-broadcast.ts";
 import { APP_NAME, APP_VERSION } from "../../src/net/user-agent.ts";
+import { openTempFileLog } from "./file-log-harness.ts";
 
 const MSG_TX = 1;
 
@@ -280,4 +281,52 @@ describe("broadcastTxV2", () => {
     await client.close();
     await server.close();
   });
+
+  test("logs ellswift, version handshake, send, and inv ack", async () => {
+    const file = openTempFileLog();
+    const [client, server] = pairedByteDuplexes();
+    const txHex = Buffer.from(encodeTransaction(sampleTx())).toString("hex");
+    const peer = runPeer(server, "inv");
+    await broadcastTxV2(client, txHex, {
+      port: 8333,
+      name: APP_NAME,
+      version: APP_VERSION,
+      ackTimeoutMs: 2_000,
+    });
+    await peer;
+    const text = file.read();
+    file.close();
+    expect(text).toMatch(/\[broadcast\] v2 ellswift start/);
+    expect(text).toMatch(/\[broadcast\] v2 ellswift ok elapsedMs=\d+/);
+    expect(text).toMatch(/\[broadcast\] v2 version-handshake start/);
+    expect(text).toMatch(/\[broadcast\] v2 version-handshake ok elapsedMs=\d+/);
+    expect(text).toMatch(/\[broadcast\] v2 send-tx/);
+    expect(text).toMatch(/\[broadcast\] v2 recv command=inv/);
+    expect(text).toMatch(/\[broadcast\] v2 ack inv/);
+    await client.close();
+    await server.close();
+  });
+
+  test("logs handshake timeout as the fail phase", async () => {
+    const file = openTempFileLog();
+    const [client, server] = pairedByteDuplexes();
+    const txHex = Buffer.from(encodeTransaction(sampleTx())).toString("hex");
+    await expect(
+      broadcastTxV2(client, txHex, {
+        port: 8333,
+        name: APP_NAME,
+        version: APP_VERSION,
+        handshakeTimeoutMs: 40,
+        ackTimeoutMs: 40,
+      }),
+    ).rejects.toThrow(/handshake timeout/i);
+    const text = file.read();
+    file.close();
+    expect(text).toMatch(/\[broadcast\] v2 ellswift start/);
+    expect(text).toMatch(
+      /\[broadcast\] v2 handshake fail phase=timeout elapsedMs=\d+: handshake timeout/,
+    );
+    await client.close();
+    await server.close();
+  }, 2_000);
 });

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { withTorDialRetries } from "../../src/modules/broadcast/tor-dial-policy.ts";
+import { openTempFileLog } from "./file-log-harness.ts";
 
 describe("withTorDialRetries", () => {
   test("succeeds on a later cycle after disposing the failed dialer", async () => {
@@ -45,5 +46,33 @@ describe("withTorDialRetries", () => {
     );
     await expect(pending).rejects.toThrow(/cancelled|abort|fail/i);
     expect(creates).toBe(1);
+  });
+
+  test("logs each dialer cycle start, fail, dispose, and backoff", async () => {
+    const file = openTempFileLog();
+    await expect(
+      withTorDialRetries(
+        () => ({
+          dial: async () => {
+            throw new Error("tor extend circuit: timed out");
+          },
+          dispose: async () => {},
+        }),
+        async (dial, signal) => dial("1.2.3.4", 8333, signal),
+        { attempts: 2, backoffMs: 0, signal: AbortSignal.timeout(5_000) },
+      ),
+    ).rejects.toThrow(/timed out/);
+
+    const text = file.read();
+    file.close();
+    expect(text).toContain("[tor] dialer-cycle start 1/2");
+    expect(text).toMatch(
+      /\[tor\] dialer-cycle fail 1\/2: tor extend circuit: timed out/,
+    );
+    expect(text).toContain("[tor] dialer-cycle dispose 1/2");
+    expect(text).toContain("[tor] dialer-cycle backoff ms=0 next=2/2");
+    expect(text).toContain("[tor] dialer-cycle start 2/2");
+    expect(text).toContain("[tor] dialer-cycle dispose 2/2");
+    expect(text).not.toContain("[tor] dialer-cycle backoff ms=0 next=3/");
   });
 });

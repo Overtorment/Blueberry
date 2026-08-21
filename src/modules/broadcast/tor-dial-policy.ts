@@ -2,6 +2,7 @@
  * Outer Tor dial cycles: create dialer → run work → dispose.
  * Recycles the whole meek/client stack between attempts.
  */
+import { log, logError } from "../../log.ts";
 
 export type TorDialerHandle = {
   dial: (
@@ -70,26 +71,36 @@ export async function withTorDialRetries<T>(
         ? signal.reason
         : new Error("cancelled");
     }
+    log("tor", `dialer-cycle start ${attempt}/${attempts}`);
     const dialer = createDialer();
     try {
-      return await run(dialer.dial, signal);
+      const result = await run(dialer.dial, signal);
+      log("tor", `dialer-cycle ok ${attempt}/${attempts}`);
+      return result;
     } catch (err) {
       lastError = err;
       if (signal.aborted) {
+        logError("tor", `dialer-cycle abort ${attempt}/${attempts}`, err);
         throw signal.reason instanceof Error
           ? signal.reason
           : err instanceof Error
             ? err
             : new Error("cancelled");
       }
+      logError("tor", `dialer-cycle fail ${attempt}/${attempts}`, err);
     } finally {
       try {
         await dialer.dispose();
-      } catch {
-        // ignore
+      } catch (err) {
+        logError("tor", `dialer-cycle dispose-fail ${attempt}/${attempts}`, err);
       }
+      log("tor", `dialer-cycle dispose ${attempt}/${attempts}`);
     }
     if (attempt < attempts) {
+      log(
+        "tor",
+        `dialer-cycle backoff ms=${backoffMs} next=${attempt + 1}/${attempts}`,
+      );
       await sleep(backoffMs, signal);
     }
   }

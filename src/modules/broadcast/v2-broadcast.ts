@@ -13,6 +13,7 @@ import {
   type ByteDuplex,
   type Transaction,
 } from "bip324";
+import { log, logError } from "../../log.ts";
 
 const MSG_TX = 1;
 const MSG_WTX = 5;
@@ -73,6 +74,15 @@ function armDuplexDeadline(
   };
 }
 
+function describeV2Command(msg: {
+  command: string;
+  type?: { kind?: string; command?: string };
+}): string {
+  if (msg.command !== "opaque") return msg.command;
+  const inner = msg.type?.command ?? msg.type?.kind;
+  return inner ? `opaque:${inner}` : "opaque";
+}
+
 function inventoryMentionsTx(
   inventory: { type: number; hash: Uint8Array }[],
   txidInternal: Uint8Array,
@@ -109,6 +119,7 @@ export async function broadcastTxV2(
   // BIP-324 ellswift + version/verack: peer can accept TCP and never reply
   // (or speak v1 only). Closing the duplex unblocks readExactly.
   let handshakeTimedOut = false;
+  const handshakeStartedAt = Date.now();
   const disarmHandshake = armDuplexDeadline(
     duplex,
     signal,
@@ -119,19 +130,46 @@ export async function broadcastTxV2(
   );
 
   let protocol: Protocol;
+  let ellswiftDone = false;
   try {
+    log("broadcast", "v2 ellswift start");
     protocol = await Protocol.connect(duplex, {
       role: "initiator",
       network: Networks.mainnet,
     });
+    log(
+      "broadcast",
+      `v2 ellswift ok elapsedMs=${Math.max(0, Date.now() - handshakeStartedAt)}`,
+    );
+    ellswiftDone = true;
+    const versionStartedAt = Date.now();
+    log("broadcast", "v2 version-handshake start");
     await completeVersionHandshake(protocol, {
       port: options.port,
       name: options.name,
       version: options.version,
     });
+    log(
+      "broadcast",
+      `v2 version-handshake ok elapsedMs=${Math.max(0, Date.now() - versionStartedAt)}`,
+    );
   } catch (err) {
     if (signal?.aborted) throw abortError(signal, "broadcast aborted");
-    if (handshakeTimedOut) throw new Error("handshake timeout");
+    const elapsedMs = Math.max(0, Date.now() - handshakeStartedAt);
+    if (handshakeTimedOut) {
+      const timeout = new Error("handshake timeout");
+      logError(
+        "broadcast",
+        `v2 handshake fail phase=timeout elapsedMs=${elapsedMs}`,
+        timeout,
+      );
+      throw timeout;
+    }
+    logError(
+      "broadcast",
+      `v2 handshake fail phase=${ellswiftDone ? "version-handshake" : "ellswift"} elapsedMs=${elapsedMs}`,
+      err,
+    );
     throw err;
   } finally {
     disarmHandshake();
@@ -142,6 +180,7 @@ export async function broadcastTxV2(
     ackTimedOut = true;
   });
   try {
+    log("broadcast", "v2 send-tx");
     await protocol.writeMessage({ command: "tx", payload: wireTx });
     for (;;) {
       if (signal?.aborted) {
@@ -149,17 +188,20 @@ export async function broadcastTxV2(
       }
       try {
         const msg = await protocol.readMessage();
+        log("broadcast", `v2 recv command=${describeV2Command(msg)}`);
         if (
           msg.command === "opaque" &&
           msg.type.kind === "long" &&
           msg.type.command === "reject"
         ) {
+          logError("broadcast", "v2 reject");
           throw new Error("peer rejected transaction");
         }
         if (
           (msg.command === "inv" || msg.command === "getdata") &&
           inventoryMentionsTx(msg.payload.inventory, txidInternal, wtxidInternal)
         ) {
+          log("broadcast", `v2 ack ${msg.command}`);
           return;
         }
         await answerPing(protocol, msg);
@@ -170,7 +212,16 @@ export async function broadcastTxV2(
         if (err instanceof Error && err.message === "peer rejected transaction") {
           throw err;
         }
-        if (ackTimedOut || isSessionGone(err)) return;
+        if (ackTimedOut || isSessionGone(err)) {
+          log(
+            "broadcast",
+            ackTimedOut
+              ? "v2 ack timeout (accepted)"
+              : "v2 peer-closed after tx (accepted)",
+          );
+          return;
+        }
+        logError("broadcast", "v2 session error", err);
         throw err;
       }
     }
