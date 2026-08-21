@@ -13,6 +13,7 @@ import { createMessageBus } from "../../src/bus/message-bus.ts";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
 import { closeFileLog } from "../../src/log.ts";
 import { createBroadcastModule } from "../../src/modules/broadcast/index.ts";
+import { openTempFileLog } from "./file-log-harness.ts";
 
 function sampleTx(): Transaction {
   return {
@@ -381,6 +382,56 @@ describe("broadcast module", () => {
     const result = await done;
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/re-run with --log/);
+
+    await mod.stop();
+    db.close();
+  });
+
+  test("failed attempts write phase, timing, and unique-error logs", async () => {
+    const file = openTempFileLog();
+    const db = createSqliteDatabase(":memory:");
+    upsertAlive(db, "1.1.1.1");
+    const bus = createMessageBus();
+    const tx = sampleTx();
+    const txHex = Buffer.from(encodeTransaction(tx)).toString("hex");
+
+    const mod = createBroadcastModule(
+      { bus, db },
+      {
+        maxAttempts: 2,
+        connect: async () => {
+          throw new Error("dial failed");
+        },
+      },
+    );
+    await mod.start();
+
+    const done = new Promise<{ ok: boolean }>((resolve) => {
+      bus.on("broadcast:done", (p) => resolve(p));
+    });
+    bus.emit("broadcast:request", { id: "9", txHex });
+    await done;
+
+    const text = file.read();
+    file.close();
+    expect(text).toMatch(
+      /\[broadcast\] start id=9 txid=[0-9a-f]{64} txHexLen=\d+ attemptBudget=2 maxAttempts=2 dialerAttempts=3 dialTimeoutMs=\d+ handshakeTimeoutMs=\d+ ackTimeoutMs=\d+/,
+    );
+    expect(text).toMatch(/\[broadcast\] peers-ready count=1 waitMs=\d+/);
+    expect(text).toMatch(
+      /\[broadcast\] attempt 1\/2 peer=1\.1\.1\.1:8333 services=9 alive=1/,
+    );
+    expect(text).toMatch(
+      /\[broadcast\] dial start peer=1\.1\.1\.1:8333 timeoutMs=\d+/,
+    );
+    expect(text).toMatch(
+      /\[broadcast\] dial fail peer=1\.1\.1\.1:8333 elapsedMs=\d+ timeout=false: dial failed/,
+    );
+    expect(text).toMatch(
+      /\[broadcast\] exhausted attempts=2 unique=2× 1\.1\.1\.1:8333: dial failed/,
+    );
+    expect(text).toContain("[broadcast] fail-detail 1.1.1.1:8333: dial failed");
+    expect(text).not.toContain(txHex);
 
     await mod.stop();
     db.close();

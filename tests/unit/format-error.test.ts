@@ -15,4 +15,15 @@ describe("formatError", () => {
       "Errored ← stream closed",
     );
   });
+
+  test("unwraps AggregateError.errors so directory races show the real failure", () => {
+    expect(
+      formatError(
+        new AggregateError(
+          [new Error("Missing version"), new Error("Missing version")],
+          "fetchFirstOk: all failed",
+        ),
+      ),
+    ).toBe("AggregateError: fetchFirstOk: all failed ← Missing version");
+  });
 });

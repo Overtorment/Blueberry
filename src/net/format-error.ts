@@ -9,6 +9,10 @@ export function formatError(err: unknown, maxDepth = 5): string {
           ? `${cur.name}: ${cur.message}`
           : cur.message || cur.name;
       if (label && !parts.includes(label)) parts.push(label);
+      if (cur instanceof AggregateError && cur.errors.length > 0) {
+        cur = cur.errors[0];
+        continue;
+      }
       cur = cur.cause;
       continue;
     }

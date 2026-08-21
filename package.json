@@ -10,7 +10,7 @@
     "test:integration": "bun test tests/integration"
   },
   "dependencies": {
-    "@hazae41/echalote": "github:Overtorment/echalote#e7ac116",
+    "@hazae41/echalote": "github:Overtorment/echalote#2904eac",
     "@keystonehq/bc-ur-registry": "^0.8.0",
     "@noble/curves": "1.9.1",
     "@opentui/core": "^0.4.5",

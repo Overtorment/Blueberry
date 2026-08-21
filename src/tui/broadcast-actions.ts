@@ -32,7 +32,7 @@ export function startUiBroadcast(store: BroadcastStore, txHex: string): void {
   }
   const id = crypto.randomUUID();
   store.begin(id, txHex);
-  log("tui", `broadcast start id=${id}`);
+  log("tui", `broadcast start id=${id} txHexLen=${txHex.length}`);
   requestBroadcast(txHex, id);
 }
 

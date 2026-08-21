@@ -1,6 +1,7 @@
-import type { ByteDuplex } from "bip324";
+import { transactionId, type ByteDuplex } from "bip324";
 import type { EventMap } from "../../bus/types.ts";
 import type { Peer } from "../../db/types.ts";
+import { internalHexToDisplayHex } from "../../headers/hash.ts";
 import { getLogPath, log, logError } from "../../log.ts";
 import { formatError } from "../../net/format-error.ts";
 import { APP_NAME, APP_VERSION } from "../../net/user-agent.ts";
@@ -74,6 +75,28 @@ function pickAlive(
   return peers[Math.floor(random() * peers.length)];
 }
 
+function displayTxid(txHex: string): string {
+  return internalHexToDisplayHex(
+    Buffer.from(transactionId(decodeBroadcastTx(txHex))).toString("hex"),
+  );
+}
+
+function isTimeoutError(err: unknown): boolean {
+  if (err instanceof Error && err.name === "TimeoutError") return true;
+  return /timed? out/i.test(formatError(err));
+}
+
+function summarizeFailures(failures: string[]): string {
+  const counts = new Map<string, number>();
+  for (const f of failures) {
+    counts.set(f, (counts.get(f) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([detail, n]) => `${n}× ${detail}`)
+    .join(" | ");
+}
+
 export function createBroadcastModule(
   ctx: ModuleContext,
   options: BroadcastModuleOptions = {},
@@ -99,10 +122,22 @@ export function createBroadcastModule(
     return ctx.db.peers.listAliveWithServices(NODE_NETWORK, limit);
   }
 
-  async function waitForAlivePeers(signal: AbortSignal): Promise<void> {
+  async function waitForAlivePeers(signal: AbortSignal): Promise<number> {
+    const startedAt = Date.now();
+    let loggedWait = false;
     while (alivePeers(1).length === 0) {
+      if (!loggedWait) {
+        log("broadcast", "waiting-peers");
+        loggedWait = true;
+      }
       await sleep(peerWaitPollMs, signal);
     }
+    const count = alivePeers(ALIVE_PEER_PICK_LIMIT).length;
+    log(
+      "broadcast",
+      `peers-ready count=${count} waitMs=${Math.max(0, Date.now() - startedAt)}`,
+    );
+    return count;
   }
 
   async function attemptOne(
@@ -111,14 +146,34 @@ export function createBroadcastModule(
     txHex: string,
     signal: AbortSignal,
   ): Promise<void> {
+    const key = peerKey(peer);
+    const dialStartedAt = Date.now();
     const dialSignal = AbortSignal.any([
       signal,
       AbortSignal.timeout(dialTimeoutMs),
     ]);
-    log("broadcast", `dial ${peerKey(peer)}`);
-    const duplex = await dial(peer.host, peer.port, dialSignal);
+    log("broadcast", `dial start peer=${key} timeoutMs=${dialTimeoutMs}`);
+    let duplex: ByteDuplex;
     try {
-      log("broadcast", `handshake ${peerKey(peer)}`);
+      duplex = await dial(peer.host, peer.port, dialSignal);
+    } catch (err) {
+      logError(
+        "broadcast",
+        `dial fail peer=${key} elapsedMs=${Math.max(0, Date.now() - dialStartedAt)} timeout=${isTimeoutError(err)}`,
+        err,
+      );
+      throw err;
+    }
+    log(
+      "broadcast",
+      `dial ok peer=${key} elapsedMs=${Math.max(0, Date.now() - dialStartedAt)}`,
+    );
+    const sessionStartedAt = Date.now();
+    try {
+      log(
+        "broadcast",
+        `session start peer=${key} handshakeTimeoutMs=${handshakeTimeoutMs} ackTimeoutMs=${ackTimeoutMs}`,
+      );
       await broadcastTxV2(duplex, txHex, {
         port: peer.port,
         name: APP_NAME,
@@ -127,11 +182,23 @@ export function createBroadcastModule(
         ackTimeoutMs,
         signal,
       });
+      log(
+        "broadcast",
+        `session ok peer=${key} elapsedMs=${Math.max(0, Date.now() - sessionStartedAt)}`,
+      );
+    } catch (err) {
+      logError(
+        "broadcast",
+        `session fail peer=${key} elapsedMs=${Math.max(0, Date.now() - sessionStartedAt)}`,
+        err,
+      );
+      throw err;
     } finally {
       try {
         await duplex.close();
-      } catch {
-        // ignore
+        log("broadcast", `duplex close peer=${key}`);
+      } catch (err) {
+        logError("broadcast", `duplex close fail peer=${key}`, err);
       }
     }
   }
@@ -150,15 +217,22 @@ export function createBroadcastModule(
     const failures: string[] = [];
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (signal.aborted) throw abortedError(signal);
-      const peer = pickAlive(alivePeers(ALIVE_PEER_PICK_LIMIT), random);
-      if (!peer) break;
+      const peers = alivePeers(ALIVE_PEER_PICK_LIMIT);
+      const peer = pickAlive(peers, random);
+      if (!peer) {
+        log("broadcast", `attempt ${attempt}/${maxAttempts} no-alive-peer`);
+        break;
+      }
       const key = peerKey(peer);
-      log("broadcast", `attempt ${attempt}/${maxAttempts} → ${key}`);
+      log(
+        "broadcast",
+        `attempt ${attempt}/${maxAttempts} peer=${key} services=${peer.services} alive=${peers.length}`,
+      );
       emitProgress("attempt", { peer: key });
 
       try {
         await attemptOne(dial, peer, txHex, signal);
-        log("broadcast", `success via ${key}`);
+        log("broadcast", `success peer=${key}`);
         return { ok: true, peer: key };
       } catch (err) {
         if (signal.aborted) throw abortedError(signal);
@@ -166,7 +240,7 @@ export function createBroadcastModule(
         failures.push(`${key}: ${detail}`);
         logError(
           "broadcast",
-          `attempt ${attempt}/${maxAttempts} failed ${key}`,
+          `attempt ${attempt}/${maxAttempts} fail peer=${key}`,
           err,
         );
         emitProgress("failed-attempt", {
@@ -207,11 +281,12 @@ export function createBroadcastModule(
       ctx.bus.emit("broadcast:progress", payload);
     };
 
+    const startedAt = Date.now();
     try {
-      decodeBroadcastTx(txHex);
+      const txid = displayTxid(txHex);
       log(
         "broadcast",
-        `start id=${id} txHexLen=${txHex.length} maxAttempts=${maxAttempts} dialerAttempts=${dialerAttempts}`,
+        `start id=${id} txid=${txid} txHexLen=${txHex.length} attemptBudget=${attemptBudget} maxAttempts=${maxAttempts} dialerAttempts=${dialerAttempts} dialTimeoutMs=${dialTimeoutMs} handshakeTimeoutMs=${handshakeTimeoutMs} ackTimeoutMs=${ackTimeoutMs}`,
       );
       emitProgress("waiting-peers");
       await waitForAlivePeers(abort.signal);
@@ -240,6 +315,7 @@ export function createBroadcastModule(
                 emitProgress,
               );
               if (outcome.ok) return outcome.peer;
+              failures.push(...outcome.failures);
               throw new Error(
                 outcome.failures.slice(-3).join(" | ") || "no alive peers",
               );
@@ -251,11 +327,19 @@ export function createBroadcastModule(
           );
         } catch (err) {
           if (abort.signal.aborted) throw err;
-          failures = [formatError(err)];
+          if (failures.length === 0) failures = [formatError(err)];
         }
       }
 
       if (!successPeer) {
+        const unique = summarizeFailures(failures);
+        log(
+          "broadcast",
+          `exhausted attempts=${attemptsUsed} unique=${unique || "none"}`,
+        );
+        for (const detail of failures) {
+          log("broadcast", `fail-detail ${detail}`);
+        }
         const summary =
           failures.length > 0
             ? failures.slice(-3).join(" | ")
@@ -265,6 +349,10 @@ export function createBroadcastModule(
             ? `broadcast failed after ${attemptsUsed} attempts: ${summary}`
             : `broadcast failed: ${summary}`;
         log("broadcast", error);
+        log(
+          "broadcast",
+          `done fail elapsedMs=${Math.max(0, Date.now() - startedAt)}`,
+        );
         const logHint = getLogPath()
           ? ` (see ${getLogPath()})`
           : " (re-run with --log)";
@@ -276,11 +364,18 @@ export function createBroadcastModule(
         return;
       }
 
-      log("broadcast", `done ok peer=${successPeer}`);
+      log(
+        "broadcast",
+        `done ok peer=${successPeer} elapsedMs=${Math.max(0, Date.now() - startedAt)}`,
+      );
       ctx.bus.emit("broadcast:done", { id, ok: true, peer: successPeer });
     } catch (err) {
       const message = formatError(err);
       logError("broadcast", "aborted/error", err);
+      log(
+        "broadcast",
+        `done fail elapsedMs=${Math.max(0, Date.now() - startedAt)}`,
+      );
       emitProgress("error", { detail: message });
       const logHint = getLogPath()
         ? ` (see ${getLogPath()})`
@@ -309,6 +404,10 @@ export function createBroadcastModule(
       unsubRequest = ctx.bus.on("broadcast:request", ({ id, txHex }) => {
         if (stopped) return;
         if (activeId !== null) {
+          log(
+            "broadcast",
+            `reject id=${id} already-in-progress activeId=${activeId}`,
+          );
           ctx.bus.emit("broadcast:done", {
             id,
             ok: false,

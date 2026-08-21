@@ -2,6 +2,7 @@
  * Adapter: echalote `Echalote.createExitDialer` → bip324 `ByteDuplex`.
  */
 import type { ByteDuplex } from "bip324";
+import { log, logError } from "../../log.ts";
 import {
   createExitDialer,
   type ExitDialerOptions,
@@ -96,9 +97,27 @@ export function createTorByteDuplexDialer(
   const dialer = createExitDialer(options);
   return {
     async dial(host, port, signal) {
-      const stream = await dialer.dial(host, port, signal);
-      return torStreamToByteDuplex(stream);
+      const startedAt = Date.now();
+      log("tor", `dial start ${host}:${port}`);
+      try {
+        const stream = await dialer.dial(host, port, signal);
+        log(
+          "tor",
+          `dial ok ${host}:${port} elapsedMs=${Math.max(0, Date.now() - startedAt)}`,
+        );
+        return torStreamToByteDuplex(stream);
+      } catch (err) {
+        logError(
+          "tor",
+          `dial fail ${host}:${port} elapsedMs=${Math.max(0, Date.now() - startedAt)}`,
+          err,
+        );
+        throw err;
+      }
     },
-    dispose: () => dialer.dispose(),
+    async dispose() {
+      log("tor", "dialer dispose");
+      await dialer.dispose();
+    },
   };
 }
