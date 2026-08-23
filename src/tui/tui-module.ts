@@ -1,4 +1,5 @@
 import type { Module, ModuleContext } from "../modules/types.ts";
+import { compactFilterFrom } from "../wallet/birthday.ts";
 import type { Wallet } from "../wallet/wallet.ts";
 import type { BlocksMatchedStore } from "./blocks-matched-store.ts";
 import type { BroadcastStore } from "./broadcast-store.ts";
@@ -19,6 +20,21 @@ import type { PeerSocketsStore } from "./peer-sockets-store.ts";
 import type { ReceiveAddressStore } from "./receive-address-store.ts";
 import type { ModuleStatusStore } from "./status-store.ts";
 import type { WalletTxsStore } from "./wallet-txs-store.ts";
+
+function emitFiltersProgress(ctx: ModuleContext, at: number): void {
+  const tip = ctx.db.headers.tip();
+  const downloaded = ctx.db.filters.count();
+  const filterFrom = compactFilterFrom(ctx.db);
+  const total =
+    tip && filterFrom !== null
+      ? Math.max(0, tip.height - filterFrom + 1)
+      : downloaded;
+  ctx.bus.emit("filters:progress", {
+    at,
+    downloaded: Math.min(downloaded, total),
+    total,
+  });
+}
 
 export function createTuiModule(
   ctx: ModuleContext,
@@ -87,6 +103,7 @@ export function createTuiModule(
       );
       unsubs.push(
         ctx.bus.on("wallet:txs", (p) => {
+          const before = wallet?.gaps();
           hydrateWallet(
             ctx.db,
             walletTxsStore,
@@ -94,6 +111,15 @@ export function createTuiModule(
             wallet,
             p.at,
           );
+          const after = wallet?.gaps();
+          if (
+            before &&
+            after &&
+            (before.external !== after.external ||
+              before.internal !== after.internal)
+          ) {
+            emitFiltersProgress(ctx, p.at);
+          }
         }),
       );
       unsubs.push(

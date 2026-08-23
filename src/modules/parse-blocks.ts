@@ -58,8 +58,10 @@ export function createParseBlocksModule(
   let needsRun = false;
   let wake: (() => void) | undefined;
   let unsubProgress: (() => void) | undefined;
+  let unsubFilters: (() => void) | undefined;
   let unsubIdle: (() => void) | undefined;
   let unsubCatchup: (() => void) | undefined;
+  let lastGaps = wallet.gaps();
   let loopPromise: Promise<void> | undefined;
   const failedHeights = new Set<number>();
 
@@ -110,7 +112,19 @@ export function createParseBlocksModule(
     if (snap.kind === "wif" || snap.kind === "address") return false;
     const used = usedWatchIndexes(ctx.db.transactions.list(), snap);
     const result = growWatchGapsIfNeeded(loadWatchGaps(ctx.db), used);
-    if (!result.grew) return false;
+    if (!result.grew) {
+      wallet.syncFromDb();
+      const gaps = wallet.gaps();
+      if (
+        gaps.external === lastGaps.external &&
+        gaps.internal === lastGaps.internal
+      ) {
+        return false;
+      }
+      lastGaps = gaps;
+      needsRun = true;
+      return true;
+    }
     saveWatchGaps(ctx.db, result.gaps);
     wallet.refresh();
     // Rematch filters; clear parsed so prior FP downloads get re-parsed
@@ -133,6 +147,7 @@ export function createParseBlocksModule(
       downloaded: Math.min(downloaded, total),
       total,
     });
+    lastGaps = wallet.gaps();
     needsRun = true;
     return true;
   }
@@ -264,15 +279,18 @@ export function createParseBlocksModule(
         status: "starting",
       });
       wallet.refresh();
+      lastGaps = wallet.gaps();
 
-      unsubProgress = ctx.bus.on("blocks:progress", () => {
+      const onParseWake = () => {
         if (stopped) return;
         if (busy) {
           needsRun = true;
           return;
         }
         kick();
-      });
+      };
+      unsubProgress = ctx.bus.on("blocks:progress", onParseWake);
+      unsubFilters = ctx.bus.on("filters:progress", onParseWake);
       unsubIdle = ctx.bus.on("sync:idle", () => {
         if (stopped) return;
         allowed = true;
@@ -309,6 +327,8 @@ export function createParseBlocksModule(
       allowed = false;
       unsubProgress?.();
       unsubProgress = undefined;
+      unsubFilters?.();
+      unsubFilters = undefined;
       unsubIdle?.();
       unsubIdle = undefined;
       unsubCatchup?.();

@@ -1,5 +1,6 @@
 import type { Database } from "../db/types.ts";
 import { usedWatchIndexes } from "../parse/used-indexes.ts";
+import { compactFilterFrom } from "../wallet/birthday.ts";
 import {
   firstUnusedExternalAddress,
   preferredWifReceiveAddress,
@@ -10,6 +11,13 @@ import {
   loadWatchGaps,
   saveWatchGaps,
 } from "../wallet/watch-gaps.ts";
+
+function queueWatchRematch(db: Database): void {
+  const fromHeight = compactFilterFrom(db) ?? db.transactions.minHeight();
+  if (fromHeight === null) return;
+  db.filters.markUnscannedFrom(fromHeight);
+  db.parsedBlocks.clearFrom(fromHeight);
+}
 
 export type ReceiveAddressSnapshot = {
   address: string | null;
@@ -46,6 +54,7 @@ function snapshotReceiveAddress(
   const grown = growWatchGapsIfNeeded(loadWatchGaps(db), used);
   if (!grown.grew) return { address: null };
   saveWatchGaps(db, grown.gaps);
+  queueWatchRematch(db);
   const next = wallet.refresh();
   return {
     address:

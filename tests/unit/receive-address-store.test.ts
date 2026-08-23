@@ -1,3 +1,4 @@
+import { hexToBytes } from "bip158";
 import { Transaction } from "bitcoinjs-lib";
 import { describe, expect, test } from "bun:test";
 import { createSqliteDatabase } from "../../src/db/sqlite-database.ts";
@@ -42,6 +43,48 @@ describe("receive address store", () => {
       .addresses.find((a) => !a.change && a.index === 2)!.address;
     expect(store.get().address).toBe(next);
     expect(wallet.gaps().external).toBeGreaterThan(2);
+    db.close();
+  });
+
+  test("exhausted watch window queues rematch so parse cannot skip it", () => {
+    const db = createSqliteDatabase(":memory:");
+    const wallet = createWallet(db, { secret: ABANDON, addressGap: 2 });
+    for (const [i, addr] of wallet
+      .snapshot()
+      .addresses.filter((a) => !a.change)
+      .entries()) {
+      const tx = fundScript(addr.scriptPubKey, i + 1);
+      db.transactions.upsert({
+        txid: tx.getId(),
+        height: 100 + i,
+        txIndex: 0,
+        blockHashInternalHex: "11".repeat(32),
+        tx: tx.toBuffer(),
+        netDeltaSats: 1000,
+      });
+    }
+    for (const h of [100, 101, 102]) {
+      db.filters.append([
+        {
+          height: h,
+          blockHashInternalHex: "bb".repeat(32),
+          filter: hexToBytes("00"),
+        },
+      ]);
+    }
+    db.filters.markScanned([100, 101, 102]);
+    db.parsedBlocks.mark(100);
+    db.parsedBlocks.mark(101);
+
+    const store = createReceiveAddressStore();
+    store.refresh(db, wallet);
+
+    expect(wallet.gaps().external).toBeGreaterThan(2);
+    expect(db.filters.listNeedingMatch(10).map((f) => f.height)).toEqual([
+      100, 101, 102,
+    ]);
+    expect(db.parsedBlocks.has(100)).toBe(false);
+    expect(db.parsedBlocks.has(101)).toBe(false);
     db.close();
   });
 });
