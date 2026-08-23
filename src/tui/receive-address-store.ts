@@ -5,6 +5,11 @@ import {
   preferredWifReceiveAddress,
 } from "../wallet/receive-address.ts";
 import type { Wallet } from "../wallet/wallet.ts";
+import {
+  growWatchGapsIfNeeded,
+  loadWatchGaps,
+  saveWatchGaps,
+} from "../wallet/watch-gaps.ts";
 
 export type ReceiveAddressSnapshot = {
   address: string | null;
@@ -33,12 +38,22 @@ function snapshotReceiveAddress(
   if (watch.kind === "address") {
     return { address: watch.addresses[0]?.address ?? null };
   }
-  const used = usedWatchIndexes(
-    db.transactions.list().map((t) => ({ tx: t.tx })),
-    watch,
-  );
+  const txs = db.transactions.list().map((t) => ({ tx: t.tx }));
+  const used = usedWatchIndexes(txs, watch);
   const addr = firstUnusedExternalAddress(watch, used.external);
-  return { address: addr?.address ?? null };
+  if (addr) return { address: addr.address };
+
+  const grown = growWatchGapsIfNeeded(loadWatchGaps(db), used);
+  if (!grown.grew) return { address: null };
+  saveWatchGaps(db, grown.gaps);
+  const next = wallet.refresh();
+  return {
+    address:
+      firstUnusedExternalAddress(
+        next,
+        usedWatchIndexes(txs, next).external,
+      )?.address ?? null,
+  };
 }
 
 export function createReceiveAddressStore(): ReceiveAddressStore {

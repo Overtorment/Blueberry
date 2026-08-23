@@ -19,7 +19,6 @@ import {
 import { createMatchingProgressStore } from "../../src/tui/matching-progress-store.ts";
 import { createPeerSocketsStore } from "../../src/tui/peer-sockets-store.ts";
 import { createWalletTxsStore } from "../../src/tui/wallet-txs-store.ts";
-import { saveWatchGaps } from "../../src/wallet/watch-gaps.ts";
 import { createWallet } from "../../src/wallet/wallet.ts";
 
 function dummyHeader(): Uint8Array {
@@ -340,7 +339,7 @@ describe("tui hydrate", () => {
     db.close();
   });
 
-  test("cheap wallet hydrate still refreshes receive when the watch window was exhausted", () => {
+  test("hydrate unwraps the next receive address when the watch window is exhausted", () => {
     const MNEMONIC =
       "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     const db = createSqliteDatabase(":memory:");
@@ -361,16 +360,15 @@ describe("tui hydrate", () => {
     const walletTxsStore = createWalletTxsStore();
     const receive = createReceiveAddressStore();
     hydrateWallet(db, walletTxsStore, receive, wallet, 1);
-    expect(receive.get().address).toBeNull();
-
-    saveWatchGaps(db, { external: 4, internal: 4 });
-    wallet.refresh();
-    const txs = walletTxsStore.get().txs;
-    hydrateWallet(db, walletTxsStore, receive, wallet, 2);
-    expect(walletTxsStore.get().txs).toBe(txs);
     const index1 = wallet
       .snapshot()
       .addresses.find((a) => !a.change && a.index === 1);
+    expect(receive.get().address).toBe(index1?.address ?? null);
+    expect(wallet.gaps().external).toBeGreaterThan(1);
+
+    const txs = walletTxsStore.get().txs;
+    hydrateWallet(db, walletTxsStore, receive, wallet, 2);
+    expect(walletTxsStore.get().txs).toBe(txs);
     expect(receive.get().address).toBe(index1?.address ?? null);
     db.close();
   });
