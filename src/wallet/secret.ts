@@ -5,6 +5,12 @@ import { base58check } from "@scure/base";
 import { createHash } from "node:crypto";
 import { isBip38Key } from "./bip38.ts";
 import {
+  decryptSecret,
+  encryptSecret,
+  isEncryptedSecret,
+  isWellFormedEncryptedSecret,
+} from "./encryption.ts";
+import {
   isAddressValid,
   watchAddressScriptType,
 } from "./is-address-valid.ts";
@@ -66,6 +72,12 @@ type Kv = {
   keyValue: {
     get(key: string): string | null;
     set(key: string, value: string): void;
+  };
+};
+
+type SecureKv = {
+  keyValue: Kv["keyValue"] & {
+    setSecure(key: string, value: string): void;
   };
 };
 
@@ -143,19 +155,28 @@ export function hasWalletSecret(db: Kv): boolean {
 export type WalletSecretInspection =
   | { status: "missing" }
   | { status: "ok"; value: string }
+  | { status: "encrypted" }
   | { status: "invalid"; detail: string };
 
 /**
  * Boot-gate view of `wallet_secret`:
  * - missing → onboarding
- * - ok → start app
+ * - ok (plain) → encrypt screen (skippable)
+ * - encrypted → unlock screen (required)
  * - invalid → error and exit (do not open onboarding; leave the row as-is)
  */
 export function inspectWalletSecret(db: Kv): WalletSecretInspection {
   const raw = db.keyValue.get(WALLET_SECRET_KEY);
   if (raw === null || !raw.trim()) return { status: "missing" };
+  const value = raw.trim();
+  if (isEncryptedSecret(value)) {
+    if (!isWellFormedEncryptedSecret(value)) {
+      return { status: "invalid", detail: "invalid encrypted wallet_secret" };
+    }
+    return { status: "encrypted" };
+  }
   try {
-    const parsed = parseWalletSecret(raw);
+    const parsed = parseWalletSecret(value);
     return { status: "ok", value: parsed.value };
   } catch (err) {
     return {
@@ -168,11 +189,50 @@ export function inspectWalletSecret(db: Kv): WalletSecretInspection {
 export function loadWalletSecret(db: Kv): string {
   const v = db.keyValue.get(WALLET_SECRET_KEY);
   if (v === null || !v.trim()) throw new Error("wallet_secret missing");
-  return v.trim();
+  const value = v.trim();
+  if (isEncryptedSecret(value)) {
+    throw new Error("wallet_secret is encrypted");
+  }
+  return value;
 }
 
 export function saveWalletSecret(db: Kv, raw: string): ParsedWalletSecret {
   const parsed = parseWalletSecret(raw);
   db.keyValue.set(WALLET_SECRET_KEY, parsed.value);
   return parsed;
+}
+
+/** Encrypt the plain KV secret. Returns the plaintext for the session. */
+export async function encryptStoredWalletSecret(
+  db: SecureKv,
+  password: string,
+): Promise<string> {
+  const stored = db.keyValue.get(WALLET_SECRET_KEY);
+  if (stored === null || !stored.trim()) {
+    throw new Error("wallet_secret missing");
+  }
+  const value = stored.trim();
+  if (isEncryptedSecret(value)) {
+    const parsed = parseWalletSecret(await decryptSecret(value, password));
+    db.keyValue.setSecure(WALLET_SECRET_KEY, value);
+    return parsed.value;
+  }
+
+  const parsed = parseWalletSecret(value);
+  const blob = await encryptSecret(parsed.value, password);
+  db.keyValue.setSecure(WALLET_SECRET_KEY, blob);
+  return parsed.value;
+}
+
+/** Decrypt the KV blob. Returns the plaintext for the session. */
+export async function unlockStoredWalletSecret(
+  db: SecureKv,
+  password: string,
+): Promise<string> {
+  const v = db.keyValue.get(WALLET_SECRET_KEY);
+  if (v === null || !v.trim()) throw new Error("wallet_secret missing");
+  const blob = v.trim();
+  const parsed = parseWalletSecret(await decryptSecret(blob, password));
+  db.keyValue.setSecure(WALLET_SECRET_KEY, blob);
+  return parsed.value;
 }

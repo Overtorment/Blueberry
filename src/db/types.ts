@@ -128,6 +128,11 @@ export interface FiltersRepository {
 export interface KeyValueRepository {
   get(key: string): string | null;
   set(key: string, value: string): void;
+  /**
+   * Replace a sensitive value, overwrite its old SQLite cell content, and
+   * truncate the WAL before returning.
+   */
+  setSecure(key: string, value: string): void;
 }
 
 export type UtxoNameRow = {

@@ -4,7 +4,8 @@ import type { WalletSecretInspection } from "../wallet/secret.ts";
 export type OnboardingGate =
   | { action: "exit-invalid"; detail: string }
   | { action: "onboard"; startAtYearStep: boolean }
-  | { action: "start" };
+  | { action: "encrypt" }
+  | { action: "unlock" };
 
 /** Pure boot routing for wallet_secret + sync_from_year. */
 export function resolveOnboardingGate(
@@ -20,5 +21,8 @@ export function resolveOnboardingGate(
   if (year.status === "missing") {
     return { action: "onboard", startAtYearStep: true };
   }
-  return { action: "start" };
+  if (wallet.status === "encrypted") {
+    return { action: "unlock" };
+  }
+  return { action: "encrypt" };
 }

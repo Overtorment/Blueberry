@@ -32,7 +32,9 @@ import { shouldHardQuit } from "./tui/quit-key.ts";
 import { createTuiModule } from "./tui/tui-module.ts";
 import { createReceiveAddressStore } from "./tui/receive-address-store.ts";
 import { createWalletTxsStore } from "./tui/wallet-txs-store.ts";
+import { EncryptApp } from "./tui/EncryptApp.tsx";
 import { OnboardingApp } from "./tui/OnboardingApp.tsx";
+import { UnlockApp } from "./tui/UnlockApp.tsx";
 import { setActiveBlocksMatchedStore } from "./tui/use-blocks-matched.ts";
 import { setActiveBroadcastStore } from "./tui/use-broadcast.ts";
 import { setActiveFiltersProgressStore } from "./tui/use-filters-progress.ts";
@@ -55,8 +57,10 @@ import {
 } from "./sync-year.ts";
 import { markWalletBirthdayPending } from "./wallet/birthday.ts";
 import {
+  encryptStoredWalletSecret,
   inspectWalletSecret,
   saveWalletSecret,
+  unlockStoredWalletSecret,
 } from "./wallet/secret.ts";
 import { createWallet } from "./wallet/wallet.ts";
 
@@ -166,9 +170,9 @@ try {
     });
     process.once("SIGINT", () => quitOnboarding(0));
     process.once("SIGTERM", () => quitOnboarding(0));
-  } else {
-    log("main", "startApp");
-    await startApp(db);
+  } else if (gate.action === "encrypt" || gate.action === "unlock") {
+    log("main", gate.action);
+    await runProtectionGate(db, gate.action);
   }
 } catch (err) {
   logError("main", "fatal boot", err);
@@ -176,7 +180,113 @@ try {
   process.reallyExit(1);
 }
 
-async function startApp(db: Database): Promise<void> {
+async function runProtectionGate(
+  db: Database,
+  action: "encrypt" | "unlock",
+): Promise<void> {
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: false,
+    exitSignals: [],
+    useMouse: false,
+  });
+  const root = createRoot(renderer);
+  let finished = false;
+
+  const onSignal = () => quit(0);
+
+  function removeSignalListeners(): void {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+  }
+
+  function quit(code: number, err?: unknown): void {
+    if (finished) return;
+    finished = true;
+    removeSignalListeners();
+    try {
+      renderer.destroy();
+    } catch {
+      /* ignore */
+    }
+    if (err !== undefined) console.error(err);
+    log("main", `${action} quit code=${code}`);
+    process.reallyExit(code);
+  }
+
+  function goToApp(secret: string): void {
+    if (finished) return;
+    finished = true;
+    removeSignalListeners();
+    try {
+      root.unmount();
+    } catch {
+      /* ignore */
+    }
+    try {
+      renderer.destroy();
+    } catch {
+      /* ignore */
+    }
+    startApp(db, secret).catch((err) => {
+      logError("main", "fatal boot", err);
+      console.error(err instanceof Error ? err.message : String(err));
+      process.reallyExit(1);
+    });
+  }
+
+  function renderUnlock(): void {
+    root.render(
+      <UnlockApp
+        onUnlock={async (password) => {
+          const secret = await unlockStoredWalletSecret(db, password);
+          log("main", "unlock ok");
+          goToApp(secret);
+        }}
+      />,
+    );
+  }
+
+  if (action === "encrypt") {
+    root.render(
+      <EncryptApp
+        onSkip={() => {
+          const wallet = inspectWalletSecret(db);
+          if (wallet.status === "ok") {
+            log("main", "encrypt skip");
+            goToApp(wallet.value);
+          } else if (wallet.status === "encrypted") {
+            log("main", "encrypt skip blocked: wallet already encrypted");
+            renderUnlock();
+          } else {
+            quit(
+              1,
+              new Error(
+                wallet.status === "invalid"
+                  ? wallet.detail
+                  : "wallet_secret missing",
+              ),
+            );
+          }
+        }}
+        onEncrypt={async (password) => {
+          const secret = await encryptStoredWalletSecret(db, password);
+          log("main", "encrypt saved");
+          goToApp(secret);
+        }}
+      />,
+    );
+  } else {
+    renderUnlock();
+  }
+
+  renderer.keyInput.on("keypress", (key) => {
+    if (key.ctrl && key.name === "c") quit(0);
+  });
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+}
+
+async function startApp(db: Database, secret: string): Promise<void> {
   const year = loadSyncFromYear(db);
   log("main", `startApp year=${year}`);
   const bus = createMessageBus();
@@ -204,7 +314,7 @@ async function startApp(db: Database): Promise<void> {
   setActiveBroadcastStore(broadcastStore);
   setActiveBroadcastBus(bus);
 
-  const wallet = createWallet(db);
+  const wallet = createWallet(db, { secret });
   setActiveSendContext(db, wallet);
   setActivePaymentLabelContext(db);
   setActiveUtxoNamesContext(db, wallet, walletTxsStore);

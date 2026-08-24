@@ -9,7 +9,10 @@ import {
   setActiveSendContext,
 } from "../../src/tui/send-context.ts";
 import { deriveWatchWallet } from "../../src/wallet/derive.ts";
-import { saveWalletSecret } from "../../src/wallet/secret.ts";
+import {
+  encryptStoredWalletSecret,
+  saveWalletSecret,
+} from "../../src/wallet/secret.ts";
 import { createWallet } from "../../src/wallet/wallet.ts";
 
 /** BlueWallet LegacyWallet */
@@ -18,10 +21,11 @@ const DEST = "1GX36PGBUrF8XahZEGQqHqnJGW2vCZteoB";
 const ADDR_BECH32 = "bc1q3rl0mkyk0zrtxfmqn9wpcd3gnaz00yv9yp0hxe";
 
 describe("buildActiveSendTx attachNonWitnessUtxos", () => {
-  test("attaches prev tx from DB for legacy p2pkh inputs", () => {
+  test("an unlocked encrypted WIF signs with its prev tx from DB", async () => {
     const db = createSqliteDatabase(":memory:");
     saveWalletSecret(db, WIF_LEGACY);
-    const wallet = createWallet(db);
+    const secret = await encryptStoredWalletSecret(db, "pw");
+    const wallet = createWallet(db, { secret });
     setActiveSendContext(db, wallet);
 
     const watch = deriveWatchWallet(WIF_LEGACY);

@@ -26,12 +26,27 @@ describe("resolveOnboardingGate", () => {
     ).toEqual({ action: "onboard", startAtYearStep: true });
   });
 
-  test("both ok → start app", () => {
+  test("plain secret + year ok → encrypt screen", () => {
     expect(
       resolveOnboardingGate(
         { status: "ok", value: "zpub…" },
         { status: "ok", year: 2015 },
       ),
-    ).toEqual({ action: "start" });
+    ).toEqual({ action: "encrypt" });
+  });
+
+  test("encrypted secret + year ok → unlock", () => {
+    expect(
+      resolveOnboardingGate(
+        { status: "encrypted" },
+        { status: "ok", year: 2015 },
+      ),
+    ).toEqual({ action: "unlock" });
+  });
+
+  test("encrypted secret + year missing → year step first", () => {
+    expect(
+      resolveOnboardingGate({ status: "encrypted" }, { status: "missing" }),
+    ).toEqual({ action: "onboard", startAtYearStep: true });
   });
 });
