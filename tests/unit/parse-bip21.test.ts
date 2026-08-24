@@ -84,8 +84,28 @@ describe("parseBip21", () => {
     });
   });
 
+  test("returns an invalid URI address unchanged", () => {
+    expect(parseBip21("bitcoin:not-an-address")).toEqual({
+      address: "not-an-address",
+      amount: null,
+      label: null,
+    });
+  });
+
+  test("treats parameter names as case-insensitive", () => {
+    expect(parseBip21(`bitcoin:${ADDR}?AMOUNT=0.01&LABEL=rent`)).toEqual({
+      address: ADDR,
+      amount: "0.01",
+      label: "rent",
+    });
+  });
+
   test("unknown req- param returns null", () => {
     expect(parseBip21(`bitcoin:${ADDR}?req-foo=1`)).toBeNull();
+  });
+
+  test("unknown uppercase REQ- param returns null", () => {
+    expect(parseBip21(`bitcoin:${ADDR}?REQ-FOO=1`)).toBeNull();
   });
 
   test("known req-amount and req-label still parse", () => {

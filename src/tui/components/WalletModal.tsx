@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { parseBip21 } from "../../parse/bip21.ts";
 import { isSendMaxAmount, parseBtcToSats } from "../../parse/format.ts";
@@ -420,6 +420,7 @@ function SendDetailsForm(props: {
   const [addressInvalid, setAddressInvalid] = useState(false);
   const [amountInvalid, setAmountInvalid] = useState(false);
   const [labelInvalid, setLabelInvalid] = useState(false);
+  const lastWrittenRef = useRef<string | null>(null);
 
   useKeyboard((key) => {
     if (key.name === "up") {
@@ -508,10 +509,15 @@ function SendDetailsForm(props: {
         onInput={(v) => {
           const parsed = parseBip21(v);
           if (!parsed) {
+            if (lastWrittenRef.current === v) {
+              lastWrittenRef.current = null;
+              return;
+            }
             setAddress(v);
             if (addressInvalid) setAddressInvalid(false);
             return;
           }
+          lastWrittenRef.current = parsed.address;
           setAddress(parsed.address);
           if (parsed.amount !== null) {
             setAmount(parsed.amount);
