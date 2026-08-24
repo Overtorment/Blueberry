@@ -28,6 +28,13 @@ import {
 const ABANDON =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
+/** WAL can hold the row after close(); scan the main file and the WAL. */
+function diskHasBytes(dbPath: string, bytes: Buffer): boolean {
+  if (readFileSync(dbPath).includes(bytes)) return true;
+  const walPath = `${dbPath}-wal`;
+  return existsSync(walPath) && readFileSync(walPath).includes(bytes);
+}
+
 describe("encryptSecret / decryptSecret", () => {
   test("round-trip", async () => {
     const blob = await encryptSecret(ABANDON, "correct horse");
@@ -156,17 +163,13 @@ describe("encrypted wallet_secret KV", () => {
       const plainDb = createSqliteDatabase(path);
       saveWalletSecret(plainDb, ABANDON);
       plainDb.close();
-      expect(readFileSync(path).includes(secretBytes)).toBe(true);
+      expect(diskHasBytes(path, secretBytes)).toBe(true);
 
       const db = createSqliteDatabase(path);
       await encryptStoredWalletSecret(db, "pw");
       db.close();
 
-      expect(readFileSync(path).includes(secretBytes)).toBe(false);
-      const walPath = `${path}-wal`;
-      if (existsSync(walPath)) {
-        expect(readFileSync(walPath).includes(secretBytes)).toBe(false);
-      }
+      expect(diskHasBytes(path, secretBytes)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
