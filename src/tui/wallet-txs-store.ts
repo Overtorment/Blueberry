@@ -23,7 +23,7 @@ export type WalletTxRow = {
   timeLabel: string;
   netDeltaSats: number;
   netDeltaLabel: string;
-  /** User payment label from tx_payment_labels; null when unset. */
+  /** Tx payment label, or joined UTXO names for that txid when the tx has none. */
   paymentLabel: string | null;
 };
 
@@ -79,6 +79,24 @@ function parseOutpointKey(key: string): { txid: string; vout: number } {
   return { txid: key.slice(0, i), vout: Number(key.slice(i + 1)) };
 }
 
+function joinedUtxoNameByTxid(
+  names: { outpoint: string; name: string }[],
+): Map<string, string> {
+  const grouped = new Map<string, { vout: number; name: string }[]>();
+  for (const { outpoint, name } of names) {
+    const { txid, vout } = parseOutpointKey(outpoint);
+    const list = grouped.get(txid);
+    if (list) list.push({ vout, name });
+    else grouped.set(txid, [{ vout, name }]);
+  }
+  const joined = new Map<string, string>();
+  for (const [txid, rows] of grouped) {
+    rows.sort((a, b) => a.vout - b.vout);
+    joined.set(txid, rows.map((r) => r.name).join(", "));
+  }
+  return joined;
+}
+
 function timeLabelForHeight(
   db: Database,
   height: number,
@@ -115,6 +133,8 @@ export function snapshotFromDb(
   const labelByTxid = new Map(
     db.txPaymentLabels.list().map((r) => [r.txid, r.label]),
   );
+  const utxoNameRows = db.utxoNames.list();
+  const utxoNameByTxid = joinedUtxoNameByTxid(utxoNameRows);
 
   let utxos: WalletUtxoRow[] = [];
   if (wallet) {
@@ -133,7 +153,7 @@ export function snapshotFromDb(
       if (u.value > maxValue) maxValue = u.value;
     }
     const nameByOutpoint = new Map(
-      db.utxoNames.list().map((r) => [r.outpoint, r.name]),
+      utxoNameRows.map((r) => [r.outpoint, r.name]),
     );
     utxos = [...map.entries()]
       .map(([key, u]) => {
@@ -176,7 +196,8 @@ export function snapshotFromDb(
         timeLabel: timeLabelForHeight(db, tx.height, nowMs, timeLabels),
         netDeltaSats: tx.netDeltaSats,
         netDeltaLabel: formatNetDelta(delta),
-        paymentLabel: labelByTxid.get(tx.txid) ?? null,
+        paymentLabel:
+          labelByTxid.get(tx.txid) ?? utxoNameByTxid.get(tx.txid) ?? null,
       };
     }),
     utxos,
