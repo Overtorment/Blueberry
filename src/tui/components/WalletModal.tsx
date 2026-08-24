@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import { parseBip21 } from "../../parse/bip21.ts";
 import { isSendMaxAmount, parseBtcToSats } from "../../parse/format.ts";
 import type { BuildSendResult } from "../../wallet/build-send-tx.ts";
 import { isAddressValid } from "../../wallet/is-address-valid.ts";
@@ -505,8 +506,22 @@ function SendDetailsForm(props: {
         textColor={addressColor}
         focusedTextColor={addressColor}
         onInput={(v) => {
-          setAddress(v);
-          if (addressInvalid) setAddressInvalid(false);
+          const parsed = parseBip21(v);
+          if (!parsed) {
+            setAddress(v);
+            if (addressInvalid) setAddressInvalid(false);
+            return;
+          }
+          setAddress(parsed.address);
+          if (parsed.amount !== null) {
+            setAmount(parsed.amount);
+            setAmountInvalid(parseBtcToSats(parsed.amount) === null);
+          }
+          if (parsed.label !== null) {
+            setPaymentLabel(parsed.label);
+            if (labelInvalid) setLabelInvalid(false);
+          }
+          setAddressInvalid(!isAddressValid(parsed.address));
         }}
       />
       <text fg={amountInvalid ? THEME.error : THEME.fgDim}>Amount</text>
