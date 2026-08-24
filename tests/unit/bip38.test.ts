@@ -214,4 +214,12 @@ describe("masked password input", () => {
   test("full replace (e.g. select-all and retype) is not corrupted by stars", () => {
     expect(nextPasswordFromMaskedInput("ab", "hello")).toBe("hello");
   });
+
+  test("an empty widget echo is treated as delete-all", () => {
+    // OpenTUI Input emits onInput(newValue) when the value prop changes.
+    // Reusing one input for password then confirm therefore sends "" into
+    // the first-password handler and wipes it. EncryptApp remounts on field
+    // change so that echo never reaches the password setter.
+    expect(nextPasswordFromMaskedInput("secret", "")).toBe("");
+  });
 });

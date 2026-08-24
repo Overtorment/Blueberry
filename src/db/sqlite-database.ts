@@ -1016,6 +1016,21 @@ export function createSqliteDatabase(path: string): Database {
     set(key, value) {
       setKeyValue.run(key, value);
     },
+
+    setSecure(key, value) {
+      raw.exec("PRAGMA secure_delete = ON;");
+      try {
+        setKeyValue.run(key, value);
+        const result = raw
+          .query("PRAGMA wal_checkpoint(TRUNCATE);")
+          .get() as { busy: bigint; log: bigint };
+        if (result.busy !== 0n || result.log > 0n) {
+          throw new Error("failed to remove plaintext from SQLite WAL");
+        }
+      } finally {
+        raw.exec("PRAGMA secure_delete = OFF;");
+      }
+    },
   };
 
   const getUtxoName = raw.query(

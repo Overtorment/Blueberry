@@ -9,7 +9,6 @@ import {
   firstUnusedInternalAddress,
   preferredWifReceiveAddress,
 } from "../wallet/receive-address.ts";
-import { loadWalletSecret } from "../wallet/secret.ts";
 import type { Wallet } from "../wallet/wallet.ts";
 
 export type SendBuildParams = {
@@ -73,7 +72,7 @@ export function buildActiveSendTx(params: SendBuildParams): BuildSendResult {
   }
 
   return buildSend({
-    secret: loadWalletSecret(db),
+    secret: watch.secret,
     wallet: watch,
     utxos: attachNonWitnessUtxos(db, params.utxos),
     toAddress: params.toAddress,
