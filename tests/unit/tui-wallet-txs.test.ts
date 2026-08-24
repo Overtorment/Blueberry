@@ -267,4 +267,41 @@ describe("TUI wallet txs wiring", () => {
     expect(snap.txs.find((t) => t.txid === older.getId())?.paymentLabel).toBeNull();
     db.close();
   });
+
+  test("snapshotFromDb uses UTXO name as paymentLabel when tx has no label", () => {
+    const db = createSqliteDatabase(":memory:");
+    const txid = "ab".repeat(32);
+    db.transactions.upsert({
+      txid,
+      height: 1,
+      txIndex: 0,
+      blockHashInternalHex: "11".repeat(32),
+      tx: new Uint8Array([0x00]),
+      netDeltaSats: 1000,
+    });
+    db.utxoNames.upsert(`${txid}:0`, "rent");
+
+    const snap = snapshotFromDb(db, 1);
+    expect(snap.txs[0]?.paymentLabel).toBe("rent");
+    db.close();
+  });
+
+  test("snapshotFromDb joins unlabeled-tx UTXO names in vout order", () => {
+    const db = createSqliteDatabase(":memory:");
+    const txid = "ab".repeat(32);
+    db.transactions.upsert({
+      txid,
+      height: 1,
+      txIndex: 0,
+      blockHashInternalHex: "11".repeat(32),
+      tx: new Uint8Array([0x00]),
+      netDeltaSats: 1000,
+    });
+    db.utxoNames.upsert(`${txid}:2`, "lunch");
+    db.utxoNames.upsert(`${txid}:0`, "rent");
+
+    const snap = snapshotFromDb(db, 1);
+    expect(snap.txs[0]?.paymentLabel).toBe("rent, lunch");
+    db.close();
+  });
 });
