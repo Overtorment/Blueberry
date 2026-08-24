@@ -420,7 +420,9 @@ function SendDetailsForm(props: {
   const [addressInvalid, setAddressInvalid] = useState(false);
   const [amountInvalid, setAmountInvalid] = useState(false);
   const [labelInvalid, setLabelInvalid] = useState(false);
-  const lastWrittenRef = useRef<string | null>(null);
+  // OpenTUI emits onInput when a controlled value is written. Ignore that echo.
+  const echoAddressRef = useRef<string | null>(null);
+  const echoAmountRef = useRef<string | null>(null);
 
   useKeyboard((key) => {
     if (key.name === "up") {
@@ -507,19 +509,19 @@ function SendDetailsForm(props: {
         textColor={addressColor}
         focusedTextColor={addressColor}
         onInput={(v) => {
+          const echoed = echoAddressRef.current;
+          echoAddressRef.current = null;
+          if (echoed === v) return;
           const parsed = parseBip21(v);
           if (!parsed) {
-            if (lastWrittenRef.current === v) {
-              lastWrittenRef.current = null;
-              return;
-            }
             setAddress(v);
             if (addressInvalid) setAddressInvalid(false);
             return;
           }
-          lastWrittenRef.current = parsed.address;
+          echoAddressRef.current = parsed.address;
           setAddress(parsed.address);
           if (parsed.amount !== null) {
+            echoAmountRef.current = parsed.amount;
             setAmount(parsed.amount);
             setAmountInvalid(parseBtcToSats(parsed.amount) === null);
           }
@@ -538,6 +540,9 @@ function SendDetailsForm(props: {
         textColor={amountColor}
         focusedTextColor={amountColor}
         onInput={(v) => {
+          const echoed = echoAmountRef.current;
+          echoAmountRef.current = null;
+          if (echoed === v) return;
           setAmount(v);
           if (amountInvalid) setAmountInvalid(false);
         }}
