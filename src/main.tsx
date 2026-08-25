@@ -1,6 +1,11 @@
-import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
+import {
+  ensureDataDir,
+  listDataDirs,
+  resolveDataDir,
+} from "./boot/data-dir.ts";
 import { resolveOnboardingGate } from "./boot/onboarding-gate.ts";
 import { reexecSelf } from "./boot/reexec.ts";
 import { installFatalUnhandledRejection } from "./boot/unhandled-rejection.ts";
@@ -32,6 +37,7 @@ import { shouldHardQuit } from "./tui/quit-key.ts";
 import { createTuiModule } from "./tui/tui-module.ts";
 import { createReceiveAddressStore } from "./tui/receive-address-store.ts";
 import { createWalletTxsStore } from "./tui/wallet-txs-store.ts";
+import { DataDirApp } from "./tui/DataDirApp.tsx";
 import { EncryptApp } from "./tui/EncryptApp.tsx";
 import { OnboardingApp } from "./tui/OnboardingApp.tsx";
 import { UnlockApp } from "./tui/UnlockApp.tsx";
@@ -64,19 +70,20 @@ import {
 } from "./wallet/secret.ts";
 import { createWallet } from "./wallet/wallet.ts";
 
-mkdirSync("./blueberry.data", { recursive: true });
-if (shouldEnableFileLog(process.argv)) {
-  initFileLog("./blueberry.data/blueberry.log");
-}
-log("main", "boot");
-
 installFatalUnhandledRejection({
   onRejection: (reason) => logError("main", "unhandledRejection", reason),
   exit: (code) => process.reallyExit(code),
 });
 
 try {
-  const db = createSqliteDatabase("./blueberry.data/blueberry.sqlite");
+  const dataDir = await resolveOrPickDataDir();
+  ensureDataDir(dataDir);
+  if (shouldEnableFileLog(process.argv)) {
+    initFileLog(join(dataDir, "blueberry.log"));
+  }
+  log("main", `boot dataDir=${dataDir}`);
+
+  const db = createSqliteDatabase(join(dataDir, "blueberry.sqlite"));
 
   const gate = resolveOnboardingGate(
     inspectWalletSecret(db),
@@ -178,6 +185,69 @@ try {
   logError("main", "fatal boot", err);
   console.error(err instanceof Error ? err.message : String(err));
   process.reallyExit(1);
+}
+
+async function resolveOrPickDataDir(): Promise<string> {
+  const decision = resolveDataDir(listDataDirs(process.cwd()));
+  if (decision.action === "use") return decision.dir;
+  return await pickDataDir(decision.dirs);
+}
+
+async function pickDataDir(dirs: string[]): Promise<string> {
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: false,
+    exitSignals: [],
+    useMouse: false,
+  });
+  const root = createRoot(renderer);
+
+  return await new Promise<string>((resolve) => {
+    let finished = false;
+
+    const onSignal = () => quit(0);
+
+    function removeSignalListeners(): void {
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+    }
+
+    function quit(code: number): void {
+      if (finished) return;
+      finished = true;
+      removeSignalListeners();
+      try {
+        renderer.destroy();
+      } catch {
+        /* ignore */
+      }
+      log("main", `data-dir quit code=${code}`);
+      process.reallyExit(code);
+    }
+
+    function finish(dir: string): void {
+      if (finished) return;
+      finished = true;
+      removeSignalListeners();
+      try {
+        root.unmount();
+      } catch {
+        /* ignore */
+      }
+      try {
+        renderer.destroy();
+      } catch {
+        /* ignore */
+      }
+      resolve(dir);
+    }
+
+    root.render(<DataDirApp dirs={dirs} onSelect={finish} />);
+    renderer.keyInput.on("keypress", (key) => {
+      if (key.ctrl && key.name === "c") quit(0);
+    });
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+  });
 }
 
 async function runProtectionGate(
