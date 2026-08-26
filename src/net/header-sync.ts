@@ -5,10 +5,32 @@ import {
   completeVersionHandshake,
   type BlockHeader,
   type ByteDuplex,
+  type Message,
 } from "bip324";
 import { config } from "../config.ts";
+import { MSG_BLOCK, MSG_WITNESS_BLOCK } from "./block-sync.ts";
 import type { TcpConnect } from "./types.ts";
 import { APP_NAME, APP_VERSION } from "./user-agent.ts";
+
+const MSG_CMPCT_BLOCK = 4;
+
+/** Inv/headers that mean the peer knows a block we may not have yet. */
+export function headerMessageSuggestsNewTip(message: Message): boolean {
+  if (message.command === "headers") {
+    return message.payload.headers.length > 0;
+  }
+  if (message.command === "inv") {
+    return message.payload.inventory.some((item) => {
+      const base = item.type & 0x3fffffff;
+      return (
+        base === MSG_BLOCK ||
+        item.type === MSG_WITNESS_BLOCK ||
+        base === MSG_CMPCT_BLOCK
+      );
+    });
+  }
+  return false;
+}
 
 export type HeaderSyncDuplex = ByteDuplex;
 
@@ -62,6 +84,8 @@ export type HeaderSessionPoolOptions = {
   }>;
   /** Fired when open socket count may have changed (live or connecting). */
   onOpenCount?: (open: number) => void;
+  /** Fired when an idle watcher sees inv/headers that suggest a new tip. */
+  onTipHint?: () => void;
   /** Cap on live + opening sessions. Default 2 × headerRacePeers. */
   max?: number;
 };
@@ -237,6 +261,7 @@ export function createHeaderSessionPool(
     poolOptions.headersTimeoutMs ?? config.headerSyncTimeoutMs;
   const max = Math.max(1, poolOptions.max ?? config.headerRacePeers * 2);
   const onOpenCount = poolOptions.onOpenCount;
+  const onTipHint = poolOptions.onTipHint;
   const connect = poolOptions.connect;
   const sessions = new Map<string, LiveSession>();
   /** Keys with connect/handshake in flight — not yet in `sessions`. */
@@ -312,13 +337,61 @@ export function createHeaderSessionPool(
         handshake(liveDuplex, port),
         controller,
       );
+      // WHY: after IBD the session only used to read during getheaders, so
+      // peers that FIN left CLOSE_WAIT sockets and a frozen "at tip" loop.
+      // HOW: one blocking read pump; pong; tip-hint on inv/headers; drop on EOF.
+      type HeadersWaiter = {
+        resolve: (value: { startHeight: number; headers: BlockHeader[] }) => void;
+        reject: (err: unknown) => void;
+      };
+      // Box so the pump closure can see requestHeaders assignments (TS).
+      const headersWaiter: { current: HeadersWaiter | null } = { current: null };
+      void (async () => {
+        try {
+          for (;;) {
+            const message = await protocol.readMessage();
+            if (message.command === "headers") {
+              const waiter = headersWaiter.current;
+              if (waiter) {
+                waiter.resolve({
+                  startHeight,
+                  headers: message.payload.headers,
+                });
+              } else if (headerMessageSuggestsNewTip(message)) {
+                onTipHint?.();
+              }
+            } else {
+              await answerPing(protocol, message);
+              if (headerMessageSuggestsNewTip(message)) onTipHint?.();
+            }
+          }
+        } catch (err) {
+          headersWaiter.current?.reject(err);
+          void drop(host, port);
+        }
+      })();
       return {
         host,
         port,
         startHeight,
         busy: false,
-        requestHeaders: (locatorHashes, stopHash) =>
-          requestHeaderBatch(protocol, startHeight, locatorHashes, stopHash),
+        requestHeaders: async (locatorHashes, stopHash) => {
+          const result = new Promise<{
+            startHeight: number;
+            headers: BlockHeader[];
+          }>((resolve, reject) => {
+            headersWaiter.current = { resolve, reject };
+          });
+          try {
+            await protocol.writeMessage({
+              command: "getheaders",
+              payload: { version: 70_016, locatorHashes, stopHash },
+            });
+            return await result;
+          } finally {
+            headersWaiter.current = null;
+          }
+        },
         close: async () => {
           try {
             await protocol.close();

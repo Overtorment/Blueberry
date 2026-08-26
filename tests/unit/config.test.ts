@@ -9,6 +9,7 @@ describe("config", () => {
       peerCrawlIntervalMs: 15_000,
       headerSyncTimeoutMs: 30_000,
       headerRacePeers: 10,
+      headerIdleCheckMs: 10 * 60 * 1_000,
       peerConcurrency: 30,
       filterSyncTimeoutMs: 30_000,
       filterConcurrency: 10,

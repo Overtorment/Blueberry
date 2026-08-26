@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { fetchHeadersBatch } from "../../src/net/header-sync.ts";
+import { MSG_BLOCK } from "../../src/net/block-sync.ts";
+import {
+  fetchHeadersBatch,
+  headerMessageSuggestsNewTip,
+} from "../../src/net/header-sync.ts";
 import { stubDuplex } from "./stub-platform-net.ts";
 
 describe("fetchHeadersBatch", () => {
@@ -82,5 +86,45 @@ describe("fetchHeadersBatch", () => {
     expect(seen!.port).toBe(8333);
     expect(seen!.locatorHashes).toBe(locator);
     expect(seen!.stopHash).toBe(stop);
+  });
+});
+
+describe("headerMessageSuggestsNewTip", () => {
+  test("inv block and headers hint a new tip", () => {
+    expect(
+      headerMessageSuggestsNewTip({
+        command: "inv",
+        payload: { inventory: [{ type: MSG_BLOCK, hash: new Uint8Array(32) }] },
+      }),
+    ).toBe(true);
+    expect(
+      headerMessageSuggestsNewTip({
+        command: "headers",
+        payload: {
+          headers: [
+            {
+              version: 1,
+              previousBlockHash: new Uint8Array(32),
+              merkleRoot: new Uint8Array(32),
+              timestamp: 0,
+              bits: 0,
+              nonce: 0,
+            },
+          ],
+        },
+      }),
+    ).toBe(true);
+    expect(
+      headerMessageSuggestsNewTip({
+        command: "ping",
+        nonce: new Uint8Array(8),
+      }),
+    ).toBe(false);
+    expect(
+      headerMessageSuggestsNewTip({
+        command: "inv",
+        payload: { inventory: [{ type: 1, hash: new Uint8Array(32) }] },
+      }),
+    ).toBe(false);
   });
 });
