@@ -32,6 +32,10 @@ export const config = {
    */
   headerRacePeers: 10,
   /**
+   * At-tip health check / missed-block poll. One Bitcoin block time.
+   */
+  headerIdleCheckMs: 10 * 60 * 1_000,
+  /**
    * Cap on peers worked in parallel during discovery/probing. Sets how aggressively
    * the pool is filled before header/filter/block work. Too low underuses the
    * network; too high opens many sockets at once and can overwhelm local resources

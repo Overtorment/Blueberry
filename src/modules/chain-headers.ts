@@ -242,6 +242,40 @@ function applyHeaderBatch(
   return { status: "applied", chain: chainAfterBranch(chain, branch) };
 }
 
+/**
+ * WHY: the pool rarely hits the 20-watcher cap. Napping only when isFull()
+ * never naps, and the loop races getheaders every 100ms.
+ * HOW: short wait only with zero live watchers. Any live watcher takes the
+ * 10min health check; inv hints and last-socket drop still wake.
+ */
+export const HEADER_WATCHER_FILL_MS = 100;
+
+export function atTipWaitMs(
+  pollIntervalMs: number,
+  hasLiveWatchers: boolean,
+): number {
+  return hasLiveWatchers ? pollIntervalMs : HEADER_WATCHER_FILL_MS;
+}
+
+/**
+ * WHY: sync:idle sets quiet so a chatty peer DB does not spin the loop.
+ * HOW: still wake when we have no live hdr sockets — that is recover-from-offline.
+ * Tests inject fetchBatch (no pool) and pass hasLiveWatchers=true so their
+ * quiet behavior stays the old "ignore peers:updated" path.
+ */
+export function ignoreQuietPeerKick(
+  quiet: boolean,
+  waitingForPeers: boolean,
+  hasLiveWatchers: boolean,
+): boolean {
+  return quiet && !waitingForPeers && hasLiveWatchers;
+}
+
+/** WHY: last hdr FIN must not leave us in the 10min wait with hdr=0. */
+export function lostLastWatcher(prevOpen: number, nextOpen: number): boolean {
+  return prevOpen > 0 && nextOpen === 0;
+}
+
 export function createChainHeadersModule(
   ctx: ModuleContext,
   options: ChainHeadersOptions,
@@ -251,15 +285,32 @@ export function createChainHeadersModule(
   const headersTimeoutMs =
     options.headersTimeoutMs ?? config.headerSyncTimeoutMs;
   const racePeers = Math.max(1, options.racePeers ?? config.headerRacePeers);
-  const pollIntervalMs = options.pollIntervalMs ?? 30_000;
+  const pollIntervalMs = options.pollIntervalMs ?? config.headerIdleCheckMs;
   const consensus = options.consensus ?? BLUEBERRY_HEADER_CONSENSUS;
   const checkpointHeight = consensus.checkpoint.height;
   const now = options.now ?? Date.now;
   const nowSeconds =
     options.nowSeconds ?? (() => Math.floor(Date.now() / 1_000));
 
+  let hdrOpen = 0;
+  let wake: (() => void) | undefined;
+  let durableWake = false;
+
+  function kick(): void {
+    wake?.();
+  }
+
+  function durableKick(): void {
+    durableWake = true;
+    kick();
+  }
+
   function emitSockets(open: number): void {
+    const lostLast = lostLastWatcher(hdrOpen, open);
+    hdrOpen = open;
     ctx.bus.emit("peers:sockets", { at: now(), kind: "hdr", open });
+    // HOW: pool already dropped the socket; durableKick aborts the 10min nap.
+    if (lostLast) durableKick();
   }
 
   // Injected fetchBatch bypasses the pool (tests). Production reuses sessions.
@@ -270,6 +321,7 @@ export function createChainHeadersModule(
         connectTimeoutMs,
         headersTimeoutMs,
         onOpenCount: emitSockets,
+        onTipHint: durableKick,
       });
   const fetchBatch =
     options.fetchBatch ??
@@ -280,7 +332,6 @@ export function createChainHeadersModule(
   let waitingForPeers = false;
   let unsubIdle: (() => void) | undefined;
   let unsubCatchup: (() => void) | undefined;
-  let wake: (() => void) | undefined;
   let unsubPeers: (() => void) | undefined;
   let loopPromise: Promise<void> | undefined;
   let maxPeerStartHeight = 0;
@@ -364,8 +415,17 @@ export function createChainHeadersModule(
       }) => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         resolve(value);
       };
+
+      // Leave racers running: aborting them would drop live watchers.
+      // A partial empty reply is not "at tip" — that would 10min-nap
+      // while another racer might still have headers.
+      const timer = setTimeout(() => {
+        finish({ winner: null, failed: [...failed], busyOnly: hardFails === 0 });
+      }, headersTimeoutMs);
+      timer.unref?.();
 
       const onSettledPeer = () => {
         pending--;
@@ -390,7 +450,12 @@ export function createChainHeadersModule(
           }),
         ).then(
           (result) => {
-            if (settled) return;
+            if (settled) {
+              // Race already timed out. A late non-empty batch is the missed
+              // tip — durableKick aborts the 10min nap.
+              if (result.ok && result.headers.length > 0) durableKick();
+              return;
+            }
             if (result.ok) {
               if (result.headers.length > 0) {
                 finish({
@@ -432,13 +497,14 @@ export function createChainHeadersModule(
     });
   }
 
-  function kick() {
-    wake?.();
-  }
-
   function waitForKick(ms: number): Promise<void> {
     return new Promise((resolve) => {
       if (stopped) {
+        resolve();
+        return;
+      }
+      if (durableWake) {
+        durableWake = false;
         resolve();
         return;
       }
@@ -446,6 +512,7 @@ export function createChainHeadersModule(
       const done = () => {
         if (settled) return;
         settled = true;
+        durableWake = false;
         clearTimeout(timer);
         if (wake === done) wake = undefined;
         resolve();
@@ -453,6 +520,7 @@ export function createChainHeadersModule(
       const timer = setTimeout(done, ms);
       timer.unref?.();
       wake = done;
+      if (durableWake) done();
     });
   }
 
@@ -523,6 +591,7 @@ export function createChainHeadersModule(
     }
 
     while (!stopped) {
+      try {
       const allAlive = ctx.db.peers.listAlive();
       const alive = allAlive.filter((p) => !dead.has(peerKey(p.host, p.port)));
 
@@ -600,7 +669,9 @@ export function createChainHeadersModule(
           loggedTipHeight = tipHeight;
           log("chain-headers", `at tip height=${tipHeight}`);
         }
-        await waitForKick(pollIntervalMs);
+        // HOW: no pool (injected-fetch tests) counts as "watchers exist"
+        // so existing pollIntervalMs backoff tests still hold.
+        await waitForKick(atTipWaitMs(pollIntervalMs, pool === null || hdrOpen > 0));
         continue;
       }
 
@@ -639,6 +710,11 @@ export function createChainHeadersModule(
         markPeerHardFailed(peer);
         await waitForKick(500);
       }
+      } catch (err) {
+        if (stopped) break;
+        logError("chain-headers", "loop fail", err);
+        await waitForKick(500);
+      }
     }
   }
 
@@ -661,12 +737,15 @@ export function createChainHeadersModule(
       });
       unsubCatchup = ctx.bus.on("sync:catchup", () => {
         quiet = false;
-        kick();
+        durableKick();
       });
       unsubPeers = ctx.bus.on("peers:updated", () => {
-        // At-tip idle must not refetch on every probe. Wake only the
-        // no-peer wait so coming back online resumes getheaders.
-        if (quiet && !waitingForPeers) return;
+        // hasLiveWatchers: no pool (tests) counts as "watchers exist".
+        if (
+          ignoreQuietPeerKick(quiet, waitingForPeers, pool === null || hdrOpen > 0)
+        ) {
+          return;
+        }
         kick();
       });
       loopPromise = detachLoop(ctx, "chain-headers", runLoop());
@@ -686,7 +765,7 @@ export function createChainHeadersModule(
       unsubPeers = undefined;
       waitingForPeers = false;
       quiet = false;
-      kick();
+      durableKick();
       await pool?.closeAll();
       await loopPromise;
       await pool?.closeAll();

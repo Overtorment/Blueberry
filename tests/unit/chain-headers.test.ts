@@ -836,6 +836,42 @@ describe("chain-headers", () => {
     db.close();
   });
 
+  test("empty race times out a hung peer and keeps polling", async () => {
+    const bus = createMessageBus();
+    const db = createSqliteDatabase(":memory:");
+    upsertPeer(db, "fast.peer");
+    upsertPeer(db, "hung.peer");
+    const tried: string[] = [];
+    const mod = createChainHeadersModule(
+      { bus, db },
+      {
+        net: stubPlatformNet(),
+        racePeers: 2,
+        connectTimeoutMs: 80,
+        headersTimeoutMs: 80,
+        pollIntervalMs: 40,
+        fetchBatch: async (host) => {
+          tried.push(host);
+          if (host === "hung.peer") {
+            await new Promise(() => {});
+          }
+          return {
+            ok: true as const,
+            startHeight: CHECKPOINT_HEIGHT + 1,
+            headers: [],
+          };
+        },
+      },
+    );
+    await mod.start();
+    await waitFor(
+      () => tried.filter((h) => h === "fast.peer").length >= 2,
+      2000,
+    );
+    await mod.stop();
+    db.close();
+  });
+
   test("empty headers do not win a race against an in-flight non-empty batch", async () => {
     const bus = createMessageBus();
     const db = createSqliteDatabase(":memory:");
