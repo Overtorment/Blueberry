@@ -2,17 +2,7 @@ import { base58check } from "@scure/base";
 import { p2pkh } from "@scure/btc-signer";
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-const bip38 = require("bip38") as {
-  decryptAsync: (
-    encrypted: string,
-    password: string,
-    progress?: (status: { percent: number }) => void,
-    scryptParams?: { N: number; r: number; p: number },
-  ) => Promise<{ privateKey: Uint8Array; compressed: boolean }>;
-};
+import bip38 from "bip38";
 
 function sha256(data: Uint8Array): Uint8Array {
   return new Uint8Array(createHash("sha256").update(data).digest());

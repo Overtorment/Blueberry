@@ -7,7 +7,6 @@ import { formatError } from "../../net/format-error.ts";
 import { APP_NAME, APP_VERSION } from "../../net/user-agent.ts";
 import type { Module, ModuleContext } from "../types.ts";
 import { withTorDialRetries } from "./tor-dial-policy.ts";
-import { createTorByteDuplexDialer } from "./tor-byte-duplex.ts";
 import { broadcastTxV2, decodeBroadcastTx } from "./v2-broadcast.ts";
 
 /** Bitcoin NODE_NETWORK — can serve the chain (and accept txs). */
@@ -305,6 +304,7 @@ export function createBroadcastModule(
         else failures = outcome.failures;
       } else {
         try {
+          const { createTorByteDuplexDialer } = await import("./tor-byte-duplex.ts");
           successPeer = await withTorDialRetries(
             () => createTorByteDuplexDialer(),
             async (dial, signal) => {

@@ -31,10 +31,9 @@ type EchaloteModule = {
   Echalote: EchaloteNamespace;
 };
 
-const { Echalote } = require("@hazae41/echalote") as EchaloteModule;
-
 export function createExitDialer(
   options: ExitDialerOptions = {},
 ): ExitDialer {
+  const { Echalote } = require("@hazae41/echalote") as EchaloteModule;
   return Echalote.createExitDialer(options);
 }

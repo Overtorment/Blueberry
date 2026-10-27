@@ -42,6 +42,7 @@ export function createFiltersMatchingModule(
   let unsubProgress: (() => void) | undefined;
   let loopPromise: Promise<void> | undefined;
   let loadedGaps: WatchGaps | undefined;
+  let loadedScripts: Uint8Array[] | undefined;
   let scannedCount = 0;
   let totalCount = 0;
 
@@ -90,12 +91,13 @@ export function createFiltersMatchingModule(
       try {
         wallet.syncFromDb();
         const gaps = wallet.gaps();
+        const scripts = wallet.scripts();
         // Use loadedGaps, not syncFromDb().grew — parse-blocks refresh() would
         // hide growth and skip re-queue after an in-flight markScanned.
         if (
           loadedGaps !== undefined &&
           (loadedGaps.external !== gaps.external ||
-            loadedGaps.internal !== gaps.internal)
+            loadedGaps.internal !== gaps.internal || loadedScripts !== scripts)
         ) {
           const fromHeight =
             compactFilterFrom(ctx.db) ?? ctx.db.transactions.minHeight();
@@ -108,6 +110,7 @@ export function createFiltersMatchingModule(
           }
         }
         loadedGaps = gaps;
+        loadedScripts = scripts;
         const scannedWith = gaps;
         let matches = 0;
         const scanTotal = ctx.db.filters.count();
@@ -120,7 +123,7 @@ export function createFiltersMatchingModule(
         }
         const advanced = await scanFiltersForMatches(
           ctx.db,
-          wallet.scripts(),
+          scripts,
           {
             onMatch: (m) => {
               matches++;
@@ -141,10 +144,11 @@ export function createFiltersMatchingModule(
             // draining a rematch queue (wasted CPU until the next loop).
             shouldContinue: () => {
               if (stopped) return false;
+              wallet.syncFromDb();
               const g = wallet.peekGaps();
               return (
                 g.external === scannedWith.external &&
-                g.internal === scannedWith.internal
+                g.internal === scannedWith.internal && wallet.scripts() === scripts
               );
             },
           },
@@ -159,7 +163,7 @@ export function createFiltersMatchingModule(
         const gapsNow = wallet.peekGaps();
         if (
           scannedWith.external !== gapsNow.external ||
-          scannedWith.internal !== gapsNow.internal
+          scannedWith.internal !== gapsNow.internal || wallet.scripts() !== scripts
         ) {
           needsRun = true;
         }

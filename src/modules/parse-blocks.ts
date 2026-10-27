@@ -3,6 +3,7 @@ import { buildUtxoMap, netDeltasForTxs } from "../parse/balance.ts";
 import { extractWatchTxs } from "../parse/extract.ts";
 import { usedWatchIndexes } from "../parse/used-indexes.ts";
 import { compactFilterFrom } from "../wallet/birthday.ts";
+import { observeBip47Transactions } from "../wallet/bip47-wallet.ts";
 import type { Wallet } from "../wallet/wallet.ts";
 import { log, logError } from "../log.ts";
 import {
@@ -95,7 +96,9 @@ export function createParseBlocksModule(
   function refreshNetDeltasAndEmit(): void {
     const snap = wallet.snapshot();
     const rows = ctx.db.transactions.list();
-    const deltas = netDeltasForTxs(rows, snap.scripts);
+    const spendableScripts = snap.addresses.filter((address) => address.path !== "bip47-notification")
+      .map((address) => address.scriptPubKey);
+    const deltas = netDeltasForTxs(rows, spendableScripts);
     for (const row of rows) {
       const d = deltas.get(row.txid) ?? 0n;
       if (BigInt(row.netDeltaSats) !== d) {
@@ -186,6 +189,14 @@ export function createParseBlocksModule(
       const block = blocks[i]!;
       await yieldOnce();
       if (stopped || !allowed) return;
+      const currentBlock = ctx.db.blocks.get(block.height);
+      const currentHeader = ctx.db.headers.get(block.height);
+      if (!currentBlock || currentBlock.blockHashInternalHex !== block.blockHashInternalHex ||
+          (currentHeader && currentHeader.hashInternalHex !== block.blockHashInternalHex)) {
+        failedHeights.add(block.height);
+        needsRun = true;
+        continue;
+      }
       try {
         const parsed = Block.fromBuffer(Buffer.from(block.block));
         const watchTxs = extractWatchTxs(parsed, scripts, utxos);
@@ -200,6 +211,18 @@ export function createParseBlocksModule(
           });
         }
         ctx.db.parsedBlocks.mark(block.height);
+        if (observeBip47Transactions(ctx.db, wallet.snapshot(), watchTxs)) {
+          wallet.refresh();
+          const fromHeight = compactFilterFrom(ctx.db) ?? ctx.db.transactions.minHeight();
+          if (fromHeight !== null) {
+            ctx.db.filters.markUnscannedFrom(fromHeight);
+            ctx.db.parsedBlocks.clearFrom(fromHeight);
+          }
+          needsRun = true;
+          refreshNetDeltasAndEmit();
+          ctx.bus.emit("filters:progress", { at: now(), downloaded: ctx.db.filters.count(), total: ctx.db.filters.count() });
+          return;
+        }
         if (watchTxs.length > 0) {
           sawWatchTx = true;
           refreshNetDeltasAndEmit();

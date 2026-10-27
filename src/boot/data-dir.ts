@@ -1,5 +1,6 @@
-import { mkdirSync, readdirSync, statSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { ensurePrivateDirectory } from "../storage/private-files.ts";
 
 export const DEFAULT_DATA_DIR = "blueberry.data";
 
@@ -21,7 +22,7 @@ export function listDataDirs(cwd: string): string[] {
 
 function isDirectory(path: string): boolean {
   try {
-    return statSync(path).isDirectory();
+    return lstatSync(path).isDirectory();
   } catch {
     return false;
   }
@@ -45,7 +46,7 @@ export function defaultDataDirIndex(dirs: readonly string[]): number {
 /** Create `dir` if missing. Throws if the name is already a non-directory. */
 export function ensureDataDir(dir: string): void {
   try {
-    mkdirSync(dir, { recursive: true });
+    ensurePrivateDirectory(dir);
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code === "EEXIST" || code === "ENOTDIR") {

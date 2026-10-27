@@ -13,7 +13,7 @@ export function firstUnusedExternalAddress(
 ): WatchAddress | null {
   const used = new Set(usedExternal);
   const externals = wallet.addresses
-    .filter((a) => !a.change)
+    .filter((a) => !a.change && !a.path.startsWith("bip47"))
     .sort((a, b) => a.index - b.index);
   for (const addr of externals) {
     if (!used.has(addr.index)) return addr;

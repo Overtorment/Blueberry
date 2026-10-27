@@ -107,7 +107,7 @@ export function createBroadcastStore(): BroadcastStore {
           attempt: snap.attempt,
           maxAttempts: snap.maxAttempts,
           peer: payload.peer,
-          detail: `Sent via ${payload.peer}`,
+          detail: `Submitted via ${payload.peer}; acceptance and confirmation are not verified`,
           error: null,
         };
       } else {

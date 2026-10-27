@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { parseBip21 } from "../../parse/bip21.ts";
+import { scanCameraQr } from "../camera-qr.ts";
+import { bip47NotificationDetails } from "../bip47-form.ts";
+import { isPaymentCode } from "../../wallet/bip47.ts";
 import { isSendMaxAmount, parseBtcToSats } from "../../parse/format.ts";
 import type { BuildSendResult } from "../../wallet/build-send-tx.ts";
-import { isAddressValid } from "../../wallet/is-address-valid.ts";
+import { isPaymentDestinationValid } from "../../wallet/payment-destination.ts";
 import {
   broadcastJobInFlight,
   cancelBroadcast,
@@ -14,7 +17,7 @@ import {
 } from "../broadcast-actions.ts";
 import { fitCryptoPsbtUrQr } from "../fit-ur-qr.ts";
 import { savePaymentLabel } from "../payment-label-actions.ts";
-import { buildActiveSendTx, pickUtxosByKeys } from "../send-context.ts";
+import { activeBip47PaymentCode, buildActiveBip47Notification, buildActiveSendTx, pickUtxosByKeys, validateActivePaymentBroadcast } from "../send-context.ts";
 import { THEME } from "../theme.ts";
 import { qrAsciiLinesFitting, qrAsciiLinesCompact } from "../qr-ascii.ts";
 import { useBroadcast, useBroadcastStore } from "../use-broadcast.ts";
@@ -36,12 +39,13 @@ type SendDetails = {
   toAddress: string;
   amountSats: bigint | "max";
   paymentLabel: string;
+  purpose?: "bip47-notification";
 };
 
 /** BlueWallet DynamicQRCode interval. */
 const UR_QR_INTERVAL_MS = 1000;
 
-function ReceiveBody(props: { address: string; qrLines: string[] }) {
+function ReceiveBody(props: { address: string; qrLines: string[]; toggleHint?: string }) {
   const qrW = props.qrLines[0]?.length ?? 0;
   const qrH = props.qrLines.length;
   return (
@@ -61,9 +65,10 @@ function ReceiveBody(props: { address: string; qrLines: string[] }) {
           </text>
         ))}
       </box>
-      <text fg={THEME.accentMagenta} wrapMode="none">
+      <text width="100%" fg={THEME.accentMagenta} wrapMode="char">
         {props.address}
       </text>
+      {props.toggleHint ? <text fg={THEME.fgDim}>{props.toggleHint}</text> : null}
     </box>
   );
 }
@@ -201,9 +206,11 @@ function AnimatedUrQr(props: { psbtHex: string }) {
   );
 }
 
-function BroadcastProgressBody() {
+function BroadcastProgressBody(props: { notificationOnly?: boolean }) {
   const b = useBroadcast();
-  const lines: string[] = [];
+  const lines: string[] = props.notificationOnly
+    ? ["BIP47 notification ONLY · 546 sats", "Wait for confirmation before creating a separate payment.", ""]
+    : [];
   if (b.phase === "waiting-peers") {
     lines.push("Waiting for alive peers…");
     lines.push(b.detail ?? "Need at least one probed-alive peer");
@@ -214,7 +221,7 @@ function BroadcastProgressBody() {
     if (b.peer) lines.push(b.peer);
     if (b.detail) lines.push(b.detail);
   } else if (b.phase === "success") {
-    lines.push("Broadcast succeeded");
+    lines.push("Transaction submitted · confirmation pending");
     if (b.peer) lines.push(b.peer);
     if (b.detail) lines.push(b.detail);
   } else if (b.phase === "error") {
@@ -256,9 +263,11 @@ function SignedTxPreviewBody(props: {
   amountSats: bigint | "max";
   paymentLabel: string;
   inputSum: bigint;
+  notificationOnly?: boolean;
 }) {
   const broadcast = useBroadcast();
   const broadcastStore = useBroadcastStore();
+  const [broadcastError, setBroadcastError] = useState<string | null>(null);
   const showBroadcast = previewShowsBroadcastUi(
     broadcast.phase,
     broadcast.txHex,
@@ -269,11 +278,17 @@ function SignedTxPreviewBody(props: {
     if (key.name !== "return" && key.name !== "enter") return;
     if (key.repeated) return;
     if (!broadcastStore) return;
-    startUiBroadcast(broadcastStore, props.txHex);
+    try {
+      validateActivePaymentBroadcast(props.preview);
+      setBroadcastError(null);
+      startUiBroadcast(broadcastStore, props.txHex);
+    } catch (error) {
+      setBroadcastError(error instanceof Error ? error.message : "Unable to broadcast payment");
+    }
   });
 
   if (showBroadcast) {
-    return <BroadcastProgressBody />;
+    return <BroadcastProgressBody notificationOnly={props.notificationOnly} />;
   }
 
   return (
@@ -286,12 +301,22 @@ function SignedTxPreviewBody(props: {
     >
       <FeeHelpLine
         preview={props.preview}
-        label="Signed tx"
+        label={props.notificationOnly ? "BIP47 notification ONLY" : "Signed tx"}
         toAddress={props.toAddress}
         amountSats={props.amountSats}
         paymentLabel={props.paymentLabel}
         inputSum={props.inputSum}
       />
+      {props.notificationOnly ? (
+        <text fg={THEME.accentMagenta} wrapMode="char">
+          546 sats establishes the BIP47 channel. This does not pay the recipient's requested amount. Wait for confirmation, then create a separate payment.
+        </text>
+      ) : null}
+      {props.preview.kind === "signed" && props.preview.resolvedToAddress ? (
+        <text fg={THEME.accentCyan} wrapMode="char">
+          {`${props.notificationOnly ? "Notification address" : "Output address"}: ${props.preview.resolvedToAddress}`}
+        </text>
+      ) : null}
       <text fg={THEME.fgDim}>Transaction hex (broadcast-ready)</text>
       <scrollbox
         flexGrow={1}
@@ -312,6 +337,7 @@ function SignedTxPreviewBody(props: {
           {props.txHex}
         </text>
       </scrollbox>
+      {broadcastError ? <text fg={THEME.error} wrapMode="char">{broadcastError}</text> : null}
       <text fg={THEME.accentCyan}>▸ Broadcast</text>
       <text fg={THEME.fgDim}>Enter to broadcast · Esc to close</text>
     </box>
@@ -353,6 +379,7 @@ function SendPreviewBody(props: {
       amountSats={props.details.amountSats}
       paymentLabel={props.details.paymentLabel}
       inputSum={props.inputSum}
+      notificationOnly={props.details.purpose === "bip47-notification"}
     />
   );
 }
@@ -423,8 +450,74 @@ function SendDetailsForm(props: {
   // OpenTUI emits onInput when a controlled value is written. Ignore that echo.
   const echoAddressRef = useRef<string | null>(null);
   const echoAmountRef = useRef<string | null>(null);
+  const [cameraScanning, setCameraScanning] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [notificationError, setNotificationError] = useState<string | null>(null);
+  const cameraRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    cameraRef.current?.abort();
+    cameraRef.current = null;
+  }, []);
+
+  async function beginCameraScan() {
+    if (cameraRef.current) return;
+    const controller = new AbortController();
+    cameraRef.current = controller;
+    setCameraScanning(true);
+    setCameraError(null);
+    try {
+      const payment = await scanCameraQr({ signal: controller.signal });
+      if (cameraRef.current !== controller) return;
+      echoAddressRef.current = payment.address;
+      setAddress(payment.address);
+      setAddressInvalid(false);
+      if (payment.amount !== null) {
+        echoAmountRef.current = payment.amount;
+        setAmount(payment.amount);
+        setAmountInvalid(false);
+      }
+      if (payment.label !== null) {
+        setPaymentLabel(payment.label);
+        setLabelInvalid(false);
+      }
+      setField(payment.amount === null ? "amount" : "label");
+    } catch (error) {
+      if (cameraRef.current === controller && !controller.signal.aborted) {
+        setCameraError(error instanceof Error ? error.message : "Camera scan failed");
+      }
+    } finally {
+      if (cameraRef.current === controller) {
+        cameraRef.current = null;
+        setCameraScanning(false);
+      }
+    }
+  }
 
   useKeyboard((key) => {
+    if (key.ctrl && key.name === "r") {
+      key.preventDefault();
+      if (key.repeated) return;
+      if (cameraRef.current) {
+        cameraRef.current.abort();
+      } else {
+        void beginCameraScan();
+      }
+      return;
+    }
+    if (cameraRef.current) return;
+    if (key.ctrl && key.name === "n") {
+      key.preventDefault();
+      if (key.repeated) return;
+      try {
+        const details = bip47NotificationDetails(address, props.selectedSumSats, paymentLabel);
+        setNotificationError(null);
+        props.onContinue(details);
+      } catch (error) {
+        setNotificationError(error instanceof Error ? error.message : "Unable to create BIP47 notification");
+      }
+      return;
+    }
     if (key.name === "up") {
       setField((f) =>
         f === "label" ? "amount" : f === "amount" ? "address" : "address",
@@ -438,7 +531,7 @@ function SendDetailsForm(props: {
       return;
     }
     if (key.name === "return" || key.name === "enter") {
-      if (!isAddressValid(address)) {
+      if (!isPaymentDestinationValid(address)) {
         setAddressInvalid(true);
         setAmountInvalid(false);
         setLabelInvalid(false);
@@ -499,16 +592,27 @@ function SendDetailsForm(props: {
       <text fg={THEME.fgDim}>
         {"Selected "}
         <BtcAmount sats={props.selectedSumSats} />
-        {" · ↑/↓ to switch · Esc to close"}
+        {" · ↑/↓ to switch · Ctrl+R camera · Esc to close"}
       </text>
+      {cameraScanning ? (
+        <text fg={THEME.accentCyan}>Camera scanning… Ctrl+R cancels · Esc closes</text>
+      ) : null}
+      {cameraError ? <text fg={THEME.error}>{cameraError}</text> : null}
+      {notificationError ? <text fg={THEME.error}>{notificationError}</text> : null}
+      {isPaymentCode(address.trim()) ? (
+        <text fg={THEME.fgDim} wrapMode="char">
+          BIP47: Ctrl+N creates a 546 sat notification only. After confirmation, Enter creates your payment.
+        </text>
+      ) : null}
       <text fg={addressInvalid ? THEME.error : THEME.fgDim}>Address</text>
       <input
-        focused={field === "address"}
+        focused={field === "address" && !cameraScanning}
         value={address}
-        placeholder="bc1…"
+        placeholder="bc1… / sp1… / PM…"
         textColor={addressColor}
         focusedTextColor={addressColor}
         onInput={(v) => {
+          if (notificationError) setNotificationError(null);
           const echoed = echoAddressRef.current;
           echoAddressRef.current = null;
           if (echoed === v) return;
@@ -529,12 +633,12 @@ function SendDetailsForm(props: {
             setPaymentLabel(parsed.label);
             if (labelInvalid) setLabelInvalid(false);
           }
-          setAddressInvalid(!isAddressValid(parsed.address));
+          setAddressInvalid(!isPaymentDestinationValid(parsed.address));
         }}
       />
       <text fg={amountInvalid ? THEME.error : THEME.fgDim}>Amount</text>
       <input
-        focused={field === "amount"}
+        focused={field === "amount" && !cameraScanning}
         value={amount}
         placeholder="0.00000000"
         textColor={amountColor}
@@ -549,7 +653,7 @@ function SendDetailsForm(props: {
       />
       <text fg={labelInvalid ? THEME.error : THEME.fgDim}>Payment label</text>
       <input
-        focused={field === "label"}
+        focused={field === "label" && !cameraScanning}
         value={paymentLabel}
         placeholder="groceries"
         textColor={labelColor}
@@ -770,6 +874,10 @@ export function WalletModal({ kind }: WalletModalProps) {
   const broadcastStore = useBroadcastStore();
   const { utxos } = useWalletTxs();
   const { width: termW, height: termH } = useTerminalDimensions();
+  const [showPaymentCode, setShowPaymentCode] = useState(false);
+  const [paymentCode, setPaymentCode] = useState<string | null>(null);
+  const [receiveError, setReceiveError] = useState<string | null>(null);
+  const receiveValue = showPaymentCode && paymentCode ? paymentCode : recv.address;
   const [sendStep, setSendStep] = useState<SendStep>("utxos");
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [details, setDetails] = useState<SendDetails | null>(null);
@@ -781,7 +889,9 @@ export function WalletModal({ kind }: WalletModalProps) {
   );
   const accent =
     kind === "receive" ? THEME.accentMagenta : THEME.accentCyan;
-  const titleLabel = kind === "receive" ? "Receive" : "Send";
+  const titleLabel = kind === "receive"
+    ? showPaymentCode && paymentCode ? "Receive · BIP47 payment code" : "Receive"
+    : details?.purpose === "bip47-notification" ? "BIP47 notification ONLY" : "Send";
 
   useEffect(() => {
     if (kind === "send") {
@@ -799,6 +909,26 @@ export function WalletModal({ kind }: WalletModalProps) {
   }, [kind, broadcastStore]);
 
   useKeyboard((key) => {
+    if (kind === "receive" && key.name === "p" && !key.repeated) {
+      if (showPaymentCode) {
+        setShowPaymentCode(false);
+        return;
+      }
+      try {
+        // Explicit opt-in: enabling the notification watch may queue a rematch.
+        const code = paymentCode ?? activeBip47PaymentCode();
+        if (!code) {
+          setReceiveError("BIP47 payment codes require a mnemonic wallet");
+          return;
+        }
+        setPaymentCode(code);
+        setReceiveError(null);
+        setShowPaymentCode(true);
+      } catch (error) {
+        setReceiveError(error instanceof Error ? error.message : "Unable to enable BIP47 receive");
+      }
+      return;
+    }
     if (key.name !== "escape" && key.name !== "esc") return;
     if (utxoRenaming) return;
     const snap = broadcastStore?.get();
@@ -830,21 +960,22 @@ export function WalletModal({ kind }: WalletModalProps) {
   });
 
   const qrLines = useMemo(() => {
-    if (kind !== "receive" || !recv.address) return [];
+    if (kind !== "receive" || !receiveValue) return [];
     return qrAsciiLinesFitting(
-      recv.address,
+      receiveValue,
       Math.max(8, termW - 4),
-      Math.max(4, termH - 6),
+      Math.max(4, termH - 8),
     );
-  }, [kind, recv.address, termW, termH]);
+  }, [kind, receiveValue, termW, termH]);
   const qrWidth = qrLines[0]?.length ?? 0;
   const qrHeight = qrLines.length;
-  const receiveWidth = recv.address
-    ? Math.max(qrWidth + 4, recv.address.length + 4)
+  const receiveWidth = receiveValue
+    ? Math.max(qrWidth + 4, Math.min(termW, receiveValue.length + 4))
     : 44;
+  const receiveAddressRows = Math.max(1, Math.ceil((receiveValue?.length ?? 0) / Math.max(1, receiveWidth - 4)));
   const receiveHeight = Math.min(
     termH,
-    qrHeight > 0 ? qrHeight + 1 /* address */ + 1 /* gap */ + 4 /* pad+border */ : 8,
+    qrHeight > 0 ? qrHeight + receiveAddressRows + 2 /* toggle hint + gap */ + 1 /* gap */ + 4 /* pad+border */ : 8,
   );
 
   const sendPsbtPreview = kind === "send" && sendStep === "preview" && preview?.kind === "psbt";
@@ -882,12 +1013,19 @@ export function WalletModal({ kind }: WalletModalProps) {
         alignItems={kind === "receive" ? "center" : "stretch"}
       >
         {kind === "receive" ? (
-          recv.address ? (
-            <ReceiveBody address={recv.address} qrLines={qrLines} />
+          receiveValue ? (
+            <ReceiveBody
+              address={receiveValue}
+              qrLines={qrLines}
+              toggleHint={receiveError ?? (showPaymentCode ? "P: Bitcoin address · Esc: close" : "P: BIP47 payment code · Esc: close")}
+            />
           ) : (
-            <text fg={THEME.fgDim}>
-              No unused receive address in watch window
-            </text>
+            <box flexDirection="column" gap={1}>
+              <text fg={THEME.fgDim}>No unused receive address in watch window</text>
+              <text fg={receiveError ? THEME.error : THEME.fgDim}>
+                {receiveError ?? "P: BIP47 payment code · Esc: close"}
+              </text>
+            </box>
           )
         ) : (
           <SendBody
@@ -915,7 +1053,10 @@ export function WalletModal({ kind }: WalletModalProps) {
               let inputSum = 0n;
               for (const u of selected) inputSum += u.valueSats;
               try {
-                const result = buildActiveSendTx({
+                const build = details.purpose === "bip47-notification"
+                  ? buildActiveBip47Notification
+                  : buildActiveSendTx;
+                const result = build({
                   utxos: selected.map((u) => ({
                     txid: u.txid,
                     vout: u.vout,

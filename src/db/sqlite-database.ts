@@ -1,4 +1,5 @@
 import { constants, Database as BunDatabase } from "bun:sqlite";
+import { secureDatabaseFiles } from "../storage/private-files.ts";
 import {
   decodeBlockHeader,
   decodeCompactTarget,
@@ -118,6 +119,7 @@ function headerWorkFromBytes(header: Uint8Array): bigint {
 }
 
 export function createSqliteDatabase(path: string): Database {
+  secureDatabaseFiles(path);
   // Required so peer services (full signed i64) round-trip without Number truncation.
   const raw = new BunDatabase(path, { safeIntegers: true });
   raw.exec("PRAGMA journal_mode = WAL;");
@@ -135,6 +137,7 @@ export function createSqliteDatabase(path: string): Database {
     // older bun builds — ignore
   }
   ensureSchema(raw);
+  secureDatabaseFiles(path);
   // Shrink a bloated WAL without blocking writers (no-op if nothing to do).
   try {
     raw.exec("PRAGMA wal_checkpoint(PASSIVE);");

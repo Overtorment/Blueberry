@@ -161,7 +161,7 @@ export type WalletSecretInspection =
 /**
  * Boot-gate view of `wallet_secret`:
  * - missing → onboarding
- * - ok (plain) → encrypt screen (skippable)
+ * - ok (plain) → required encrypt screen
  * - encrypted → unlock screen (required)
  * - invalid → error and exit (do not open onboarding; leave the row as-is)
  */
@@ -196,6 +196,7 @@ export function loadWalletSecret(db: Kv): string {
   return value;
 }
 
+/** Legacy/test helper. New production wallets must use the encrypted setup flow. */
 export function saveWalletSecret(db: Kv, raw: string): ParsedWalletSecret {
   const parsed = parseWalletSecret(raw);
   db.keyValue.set(WALLET_SECRET_KEY, parsed.value);

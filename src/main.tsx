@@ -7,6 +7,7 @@ import {
   resolveDataDir,
 } from "./boot/data-dir.ts";
 import { resolveOnboardingGate } from "./boot/onboarding-gate.ts";
+import { createWalletSetup } from "./boot/wallet-setup.ts";
 import { reexecSelf } from "./boot/reexec.ts";
 import { installFatalUnhandledRejection } from "./boot/unhandled-rejection.ts";
 import { consensusForYear } from "./checkpoint.ts";
@@ -62,10 +63,12 @@ import {
   saveSyncFromYear,
 } from "./sync-year.ts";
 import { markWalletBirthdayPending } from "./wallet/birthday.ts";
+import { encryptSecret } from "./wallet/encryption.ts";
 import {
   encryptStoredWalletSecret,
   inspectWalletSecret,
-  saveWalletSecret,
+  parseWalletSecret,
+  WALLET_SECRET_KEY,
   unlockStoredWalletSecret,
 } from "./wallet/secret.ts";
 import { createWallet } from "./wallet/wallet.ts";
@@ -101,13 +104,27 @@ try {
 
   if (gate.action === "onboard") {
     log("main", "onboarding");
+    const setup = createWalletSetup({
+      parse: (raw) => parseWalletSecret(raw).value,
+      encrypt: encryptSecret,
+      commit: (encrypted, year, created) => {
+        db.transaction(() => {
+          // A new wallet's first persisted secret is already encrypted.
+          db.keyValue.set(WALLET_SECRET_KEY, encrypted);
+          saveSyncFromYear(db, year);
+          if (created) markWalletBirthdayPending(db);
+        });
+      },
+    });
     const renderer = await createCliRenderer({
       exitOnCtrlC: false,
       exitSignals: [],
       useMouse: false,
     });
+    const onOnboardingSignal = () => quitOnboarding(0);
 
     function quitOnboarding(code: number, err?: unknown): void {
+      setup.cancel();
       try {
         renderer.destroy();
       } catch {
@@ -118,7 +135,9 @@ try {
       process.reallyExit(code);
     }
 
-    function finishOnboarding(): void {
+    function finishOnboarding(secret?: string): void {
+      process.removeListener("SIGINT", onOnboardingSignal);
+      process.removeListener("SIGTERM", onOnboardingSignal);
       try {
         root.unmount();
       } catch {
@@ -129,6 +148,14 @@ try {
       } catch {
         /* ignore */
       }
+      if (secret !== undefined) {
+        void startApp(db, secret).catch((err) => {
+          logError("main", "fatal boot", err);
+          console.error(err instanceof Error ? err.message : String(err));
+          process.reallyExit(1);
+        });
+        return;
+      }
       try {
         db.close();
       } catch {
@@ -138,12 +165,23 @@ try {
     }
 
     const root = createRoot(renderer);
+    function protectStagedWallet(year: number, created = false): void {
+      root.render(
+        <EncryptApp
+          onCancel={() => quitOnboarding(0)}
+          onEncrypt={async (password) => {
+            const secret = await setup.save(year, password, created);
+            finishOnboarding(secret);
+          }}
+        />,
+      );
+    }
     root.render(
       <OnboardingApp
         startAtYearStep={gate.startAtYearStep}
         onSecretValidated={(raw) => {
           try {
-            saveWalletSecret(db, raw);
+            setup.stage(raw);
           } catch (err) {
             quitOnboarding(1, err);
             return;
@@ -151,16 +189,18 @@ try {
         }}
         onWalletCreated={(raw) => {
           try {
-            saveWalletSecret(db, raw);
-            saveSyncFromYear(db, latestCheckpointYear());
-            markWalletBirthdayPending(db);
+            setup.stage(raw);
           } catch (err) {
             quitOnboarding(1, err);
             return;
           }
-          finishOnboarding();
+          protectStagedWallet(latestCheckpointYear(), true);
         }}
         onYearChosen={(year) => {
+          if (!gate.startAtYearStep) {
+            protectStagedWallet(year);
+            return;
+          }
           try {
             saveSyncFromYear(db, year);
           } catch (err) {
@@ -175,8 +215,8 @@ try {
     renderer.keyInput.on("keypress", (key) => {
       if (key.ctrl && key.name === "c") quitOnboarding(0);
     });
-    process.once("SIGINT", () => quitOnboarding(0));
-    process.once("SIGTERM", () => quitOnboarding(0));
+    process.once("SIGINT", onOnboardingSignal);
+    process.once("SIGTERM", onOnboardingSignal);
   } else if (gate.action === "encrypt" || gate.action === "unlock") {
     log("main", gate.action);
     await runProtectionGate(db, gate.action);
@@ -319,25 +359,7 @@ async function runProtectionGate(
   if (action === "encrypt") {
     root.render(
       <EncryptApp
-        onSkip={() => {
-          const wallet = inspectWalletSecret(db);
-          if (wallet.status === "ok") {
-            log("main", "encrypt skip");
-            goToApp(wallet.value);
-          } else if (wallet.status === "encrypted") {
-            log("main", "encrypt skip blocked: wallet already encrypted");
-            renderUnlock();
-          } else {
-            quit(
-              1,
-              new Error(
-                wallet.status === "invalid"
-                  ? wallet.detail
-                  : "wallet_secret missing",
-              ),
-            );
-          }
-        }}
+        onCancel={() => quit(0)}
         onEncrypt={async (password) => {
           const secret = await encryptStoredWalletSecret(db, password);
           log("main", "encrypt saved");
@@ -385,7 +407,7 @@ async function startApp(db: Database, secret: string): Promise<void> {
   setActiveBroadcastBus(bus);
 
   const wallet = createWallet(db, { secret });
-  setActiveSendContext(db, wallet);
+  setActiveSendContext(db, wallet, bus);
   setActivePaymentLabelContext(db);
   setActiveUtxoNamesContext(db, wallet, walletTxsStore);
 
@@ -406,8 +428,8 @@ async function startApp(db: Database, secret: string): Promise<void> {
     // Right after TUI so progress events seed tiles before heavy sync work.
     createBlocksDownloadModule(ctx, { net }),
     createSyncIdleModule(ctx),
-    createPeersDiscoveryModule(ctx, { net }),
-    createBroadcastModule(ctx),
+    createPeersDiscoveryModule(ctx, { net, resolveSeeds: net.resolveSeeds }),
+    createBroadcastModule(ctx, { connect: net.connectBroadcast }),
     createChainHeadersModule(ctx, {
       net,
       consensus: consensusForYear(year),

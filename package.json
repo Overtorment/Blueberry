@@ -7,6 +7,7 @@
     "build": "bun build --compile --outfile=dist/blueberry src/main.tsx",
     "typecheck": "tsc --noEmit",
     "test:unit": "bun test tests/unit",
+    "test:security": "bun test tests/security",
     "test:integration": "bun test tests/integration"
   },
   "dependencies": {
@@ -36,7 +37,7 @@
     "@types/react": "^19.2.0",
     "typescript": "^5.9.3"
   },
-  "trustedDependencies": [
-    "@hazae41/echalote"
-  ]
+  "overrides": {
+    "shell-quote": "1.11.0"
+  }
 }

@@ -7,6 +7,13 @@ dist/
 !.env.example
 .DS_Store
 *.tsbuildinfo
-/*.data
+*.data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+/wallet/
+/wallets/
+/.tools/
 .worktrees/
 .superpowers/

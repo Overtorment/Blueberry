@@ -43,14 +43,14 @@ describe("listDataDirs", () => {
     });
   });
 
-  test("includes symlink directories and ignores dangling links", () => {
+  test("ignores symlink directories and dangling links", () => {
     withTempCwd((cwd) => {
       mkdirSync(join(cwd, "real-wallet"));
       symlinkSync(join(cwd, "real-wallet"), join(cwd, "blueberry.data"));
       symlinkSync(join(cwd, "missing"), join(cwd, "ghost.data"));
       mkdirSync(join(cwd, "alice.data"));
 
-      expect(listDataDirs(cwd)).toEqual(["alice.data", "blueberry.data"]);
+      expect(listDataDirs(cwd)).toEqual(["alice.data"]);
     });
   });
 });

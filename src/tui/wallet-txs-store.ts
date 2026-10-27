@@ -146,7 +146,8 @@ export function snapshotFromDb(
         txIndex: t.txIndex,
         tx: t.tx,
       })),
-      wallet.scripts(),
+      wallet.snapshot().addresses.filter((address) => address.path !== "bip47-notification")
+        .map((address) => address.scriptPubKey),
     );
     let maxValue = 0n;
     for (const u of map.values()) {

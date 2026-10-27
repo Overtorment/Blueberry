@@ -37,6 +37,9 @@ jobs:
       - name: Run unit tests
         run: bun run test:unit
 
+      - name: Run security tests
+        run: bun run test:security
+
   build:
     needs: [test-unit]
     strategy:
@@ -46,9 +49,6 @@ jobs:
           - runner: ubuntu-latest
             artifact: blueberry-linux-x64
             binary: blueberry-linux-x64
-          - runner: windows-latest
-            artifact: blueberry-windows-x64
-            binary: blueberry-windows-x64.exe
           - runner: macos-15
             artifact: blueberry-macos-arm64
             binary: blueberry-macos-arm64
@@ -112,6 +112,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             artifacts/blueberry-linux-x64
-            artifacts/blueberry-windows-x64.exe
             artifacts/blueberry-macos-arm64
             artifacts/blueberry-macos-x64

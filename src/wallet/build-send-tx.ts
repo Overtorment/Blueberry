@@ -11,7 +11,7 @@ import {
   selectUTXO,
   Transaction,
 } from "@scure/btc-signer";
-import { concatBytes, sha256x2, signECDSA } from "@scure/btc-signer/utils";
+import { concatBytes, sha256x2, signECDSA, taprootTweakPrivKey } from "@scure/btc-signer/utils";
 import { scriptHex } from "../parse/extract.ts";
 import { isAddressValid } from "./is-address-valid.ts";
 import {
@@ -20,6 +20,9 @@ import {
   parseWalletSecret,
 } from "./secret.ts";
 import type { AddressScriptType, WatchAddress, WatchWallet } from "./types.ts";
+import { isSilentPaymentDestination } from "./payment-destination.ts";
+import { deriveSilentPaymentOutputs } from "./silent-payments.ts";
+import { deriveBip47ReceivePayment } from "./bip47.ts";
 
 export type SendInputUtxo = {
   txid: string;
@@ -49,6 +52,10 @@ export type BuildSendTxResult = {
   vsize: number;
   changeSats: bigint;
   changeVouts: number[];
+  /** Actual on-chain destination when a reusable address was provided. */
+  resolvedToAddress?: string;
+  purpose?: "bip47-notification";
+  bip47NotificationTxid?: string;
 };
 
 export type BuildSendPsbtResult = {
@@ -160,9 +167,57 @@ function publicKeyAtAddress(
 }
 
 function privateKeyAtPath(root: HDKey, path: string): Uint8Array {
+  if (path.startsWith("bip47/")) {
+    const [, senderCode, indexText] = path.split("/");
+    if (!senderCode || !indexText || !/^\d+$/.test(indexText)) throw new Error("invalid BIP47 payment path");
+    return deriveBip47ReceivePayment(root.derive("m/47'/0'/0'"), senderCode, Number(indexText)).privateKey;
+  }
   const child = root.derive(path);
   if (!child.privateKey) throw new Error(`missing private key at ${path}`);
   return child.privateKey;
+}
+
+/** Resolve only after coin selection is fixed; changing any input changes SP. */
+function resolveSendDestination(params: BuildSendTxParams): BuildSendTxParams {
+  const destination = params.toAddress.trim();
+  if (destination.startsWith("PM")) {
+    throw new Error("BIP47 requires a notification transaction and a payment channel before sending");
+  }
+  if (!isSilentPaymentDestination(destination)) return { ...params, toAddress: destination };
+  const account = accountKey(params.secret);
+  if (account.kind === "zpub" || account.kind === "address") {
+    throw new Error("Silent Payments sending requires private keys for every selected input; watch-only PSBTs are unsupported");
+  }
+  const seen = new Set<string>();
+  const inputs = params.utxos.map((utxo) => {
+    const outpoint = `${utxo.txid.toLowerCase()}:${utxo.vout}`;
+    if (seen.has(outpoint)) throw new Error("duplicate selected UTXO");
+    seen.add(outpoint);
+    const watched = addressForScript(params.wallet, utxo.scriptPubKey);
+    const type = scriptTypeOf(watched);
+    const privateKey = account.kind === "wif"
+      ? account.privateKey
+      : privateKeyAtPath(account.key, watched.path);
+    const publicKey = account.kind === "wif"
+      ? account.publicKey
+      : secp256k1.getPublicKey(privateKey, true);
+    if (publicKey.length !== 33) {
+      throw new Error("Silent Payments does not support uncompressed public-key inputs");
+    }
+    const payment = paymentForPubkey(type, publicKey);
+    if (scriptHex(payment.script) !== scriptHex(utxo.scriptPubKey)) {
+      throw new Error("selected UTXO script does not match its private key");
+    }
+    return {
+      txid: utxo.txid,
+      vout: utxo.vout,
+      type,
+      privateKey: type === "p2tr" ? taprootTweakPrivKey(privateKey) : privateKey,
+    };
+  });
+  const [output] = deriveSilentPaymentOutputs(inputs, [destination]);
+  if (!output) throw new Error("no eligible Silent Payments inputs");
+  return { ...params, toAddress: output.address };
 }
 
 function addressesEqual(a: string | undefined, b: string): boolean {
@@ -410,6 +465,9 @@ function buildDraftTx(params: BuildSendTxParams): {
   if (!sendMax && !isAddressValid(params.changeAddress)) {
     throw new Error("invalid change address");
   }
+  if (!sendMax && !params.wallet.addresses.some((addr) => addressesEqual(addr.address, params.changeAddress))) {
+    throw new Error("change address is not controlled by this wallet");
+  }
 
   const account = accountKey(params.secret);
   if (account.kind === "address" && !sendMax) {
@@ -423,6 +481,7 @@ function buildDraftTx(params: BuildSendTxParams): {
 
   const inputs = params.utxos.map((u) => {
     const addr = addressForScript(params.wallet, u.scriptPubKey);
+    if (addr.path === "bip47-notification") throw new Error("BIP47 notification outputs must not be spent");
     const scriptType = scriptTypeOf(addr);
     signPaths.push(addr.path);
 
@@ -466,11 +525,15 @@ function buildDraftTx(params: BuildSendTxParams): {
       };
     }
 
-    // BIP84 HD: always p2wpkh
-    const pubkey = publicKeyAtAddress(account, addr);
-    const spend = p2wpkh(pubkey);
+    const bip47 = addr.path.startsWith("bip47/");
+    if (bip47 && account.kind !== "mnemonic") throw new Error("BIP47 spending requires a mnemonic wallet");
+    const pubkey = bip47 && account.kind === "mnemonic"
+      ? secp256k1.getPublicKey(privateKeyAtPath(account.key, addr.path), true)
+      : publicKeyAtAddress(account, addr);
+    const spend = bip47 ? p2pkh(pubkey) : p2wpkh(pubkey);
+    if (bip47 && !u.nonWitnessUtxo) throw new Error("BIP47 legacy input requires previous transaction");
     const pathNums =
-      account.kind === "zpub"
+      bip47 ? [] : account.kind === "zpub"
         ? bip32Path(`m/${addr.change ? 1 : 0}/${addr.index}`)
         : bip32Path(addr.path.startsWith("m/") ? addr.path : `m/${addr.path}`);
     return {
@@ -481,12 +544,12 @@ function buildDraftTx(params: BuildSendTxParams): {
         script: u.scriptPubKey,
         amount: u.valueSats,
       },
-      bip32Derivation: [
+      ...(bip47 ? { nonWitnessUtxo: u.nonWitnessUtxo } : { bip32Derivation: [
         [
           pubkey,
           { fingerprint: account.masterFingerprint, path: pathNums },
         ] as [Uint8Array, { fingerprint: number; path: number[] }],
-      ],
+      ] }),
     };
   });
 
@@ -637,6 +700,8 @@ function signWifTx(
  * Build and sign a mainnet send. Requires a mnemonic or WIF secret.
  */
 export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult {
+  const originalDestination = params.toAddress.trim();
+  params = resolveSendDestination(params);
   const { tx, signPaths, account } = buildDraftTx(params);
   if (account.kind === "zpub" || account.kind === "address") {
     throw new Error("signing requires a mnemonic or WIF wallet secret");
@@ -651,6 +716,9 @@ export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult 
   tx.finalize();
   return {
     kind: "signed",
+    ...(isSilentPaymentDestination(originalDestination)
+      ? { resolvedToAddress: params.toAddress }
+      : {}),
     txHex: tx.hex,
     ...sendIdAndChange(tx, params),
     feeSats: tx.fee,
@@ -673,6 +741,10 @@ export function buildSignedSendTx(params: BuildSendTxParams): BuildSendTxResult 
 export function buildUnsignedSendPsbt(
   params: BuildSendTxParams,
 ): BuildSendPsbtResult {
+  if (isSilentPaymentDestination(params.toAddress)) {
+    throw new Error("Silent Payments PSBT export is unsupported; the complete input set must be signed together");
+  }
+  params = resolveSendDestination(params);
   const { tx, feeSats, vsize } = buildDraftTx(params);
   return {
     kind: "psbt",

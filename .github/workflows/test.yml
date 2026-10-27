@@ -3,6 +3,9 @@ name: Test
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test-unit:
     name: Unit tests
@@ -23,12 +26,21 @@ jobs:
       - name: Run unit tests
         run: bun run test:unit
 
+      - name: Run security tests
+        run: bun run test:security
+
   test-integration:
     name: Integration tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Start Tor for the live peer test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor
+          sudo service tor start
 
       - uses: oven-sh/setup-bun@v2
         with:

@@ -5,7 +5,7 @@ export const config = {
    * budget for header and filter downloads. Too low and healthy-but-slow peers
    * look dead; too high and dead peers stall the pipeline before the next attempt.
    */
-  peerProbeTimeoutMs: 3_000,
+  peerProbeTimeoutMs: 60_000,
   /**
    * After a good handshake, how long to wait for addr/addrv2 during a crawl
    * probe. Handshake success does not use this budget. Too low misses dumps;
@@ -30,7 +30,7 @@ export const config = {
    * peerConcurrency. Too low slows header sync when some peers are quiet; too
    * high burns sockets and can trip rate limits.
    */
-  headerRacePeers: 10,
+  headerRacePeers: 3,
   /**
    * At-tip health check / missed-block poll. One Bitcoin block time.
    */
@@ -41,7 +41,7 @@ export const config = {
    * network; too high opens many sockets at once and can overwhelm local resources
    * or remote nodes.
    */
-  peerConcurrency: 30,
+  peerConcurrency: 8,
   /**
    * After handshake, how long to wait for compact-filter traffic. This is a
    * total response budget for getcfheaders and an inactivity budget, refreshed
@@ -53,7 +53,7 @@ export const config = {
    * this is the main knob for filter-sync throughput. Too low stretches the scan;
    * too high multiplies bandwidth and peer load.
    */
-  filterConcurrency: 10,
+  filterConcurrency: 3,
   /**
    * How many compact-filter headers to ask for per request. Larger batches mean
    * fewer round trips but heavier replies and more pain if a peer dies mid-batch
@@ -72,7 +72,7 @@ export const config = {
    * from general peerProbeTimeoutMs). Too low drops usable peers early; too high
    * leaves slots occupied by peers that never come up.
    */
-  blockConnectTimeoutMs: 3_000,
+  blockConnectTimeoutMs: 60_000,
   /**
    * After handshake, how long to wait for the block after getdata. Full blocks are
    * larger than headers/filters, so this is often longer than probe timeouts. Too
@@ -84,7 +84,7 @@ export const config = {
    * matching has flagged blocks of interest. Too low stretches catch-up; too high
    * spikes bandwidth and open sessions.
    */
-  blockConcurrency: 10,
+  blockConcurrency: 3,
   /**
    * BIP44-style unused-address lookaround. When a used index falls in the last
    * gapLimit of the watch window, grow that chain by gapLimit and rematch.

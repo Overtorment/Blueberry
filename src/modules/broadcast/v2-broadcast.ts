@@ -216,8 +216,8 @@ export async function broadcastTxV2(
           log(
             "broadcast",
             ackTimedOut
-              ? "v2 ack timeout (accepted)"
-              : "v2 peer-closed after tx (accepted)",
+              ? "v2 ack timeout (submitted; acceptance unknown)"
+              : "v2 peer-closed after tx (submitted; acceptance unknown)",
           );
           return;
         }

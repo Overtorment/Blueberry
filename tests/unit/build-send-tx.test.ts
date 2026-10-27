@@ -41,6 +41,19 @@ function utxoAt(wallet: ReturnType<typeof deriveWatchWallet>, index = 0) {
 }
 
 describe("buildSignedSendTx", () => {
+  test("rejects a valid change address that the wallet does not control", () => {
+    const wallet = abandonWallet();
+    expect(() => buildSignedSendTx({
+      secret: MNEMONIC,
+      wallet,
+      utxos: [utxoAt(wallet)],
+      toAddress: BLUE_EXTERNAL_1,
+      amountSats: 50_000n,
+      feeRateSatPerVb: 1,
+      changeAddress: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+    })).toThrow(/change address is not controlled/);
+  });
+
   test("signs p2wpkh with change near the requested fee rate", () => {
     const wallet = abandonWallet();
     const feeRate = 10;

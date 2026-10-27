@@ -1,5 +1,6 @@
 import { useKeyboard } from "@opentui/react";
 import { useState } from "react";
+import { requireNewWalletPassword } from "../boot/wallet-setup.ts";
 import { BlueberryArt } from "./components/BlueberryArt.tsx";
 import { Panel } from "./chrome.tsx";
 import {
@@ -10,12 +11,12 @@ import { THEME } from "./theme.ts";
 
 export type EncryptAppProps = {
   onEncrypt: (password: string) => void | Promise<void>;
-  onSkip: () => void;
+  onCancel: () => void;
 };
 
 type Field = "password" | "confirm";
 
-export function EncryptApp({ onEncrypt, onSkip }: EncryptAppProps) {
+export function EncryptApp({ onEncrypt, onCancel }: EncryptAppProps) {
   const [field, setField] = useState<Field>("password");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -24,8 +25,10 @@ export function EncryptApp({ onEncrypt, onSkip }: EncryptAppProps) {
 
   async function submit() {
     if (busy) return;
-    if (!password) {
-      setError("password is required");
+    try {
+      requireNewWalletPassword(password);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
       return;
     }
     if (field === "password") {
@@ -57,7 +60,7 @@ export function EncryptApp({ onEncrypt, onSkip }: EncryptAppProps) {
         setField("password");
         return;
       }
-      onSkip();
+      onCancel();
     }
   });
 
@@ -82,7 +85,7 @@ export function EncryptApp({ onEncrypt, onSkip }: EncryptAppProps) {
       <box width="80%" height={9} flexGrow={0}>
         <Panel title="Encrypt" state="active" accent="magenta" height="100%">
           <text fg={THEME.fgDim}>
-            Encrypt the wallet on disk. If you forget the password, only the
+            Choose a password of at least 12 characters. If you forget it, only the
             written seed can recover it.
           </text>
           <input
@@ -107,7 +110,7 @@ export function EncryptApp({ onEncrypt, onSkip }: EncryptAppProps) {
               ? "Encrypting…"
               : (error ??
                 (field === "password"
-                  ? "Enter to continue · Esc to skip"
+                  ? "Enter to continue · Esc to exit"
                   : "Enter to encrypt · Esc to go back"))}
           </text>
         </Panel>

@@ -13,6 +13,7 @@ export function usedWatchIndexes(
 ): { external: number[]; internal: number[] } {
   const scriptToIndex = new Map<string, { change: boolean; index: number }>();
   for (const addr of wallet.addresses) {
+    if (addr.path.startsWith("bip47")) continue;
     scriptToIndex.set(scriptHex(addr.scriptPubKey), {
       change: addr.change,
       index: addr.index,

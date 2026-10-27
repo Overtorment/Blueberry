@@ -219,10 +219,13 @@ export function OnboardingApp({
       ) : null}
 
       {step === "import" ? (
-        <box width="80%" height={8} flexGrow={0}>
+        <box width="80%" height={10} flexGrow={0}>
           <Panel title="Import" state="active" accent="magenta" height="100%">
             <text fg={THEME.fgDim}>
               Enter BIP39 seed, account zpub, WIF (or password-protected WIF), or address
+            </text>
+            <text fg={THEME.fgDim}>
+              BIP39 seeds with an extra passphrase are not supported.
             </text>
             <input
               focused

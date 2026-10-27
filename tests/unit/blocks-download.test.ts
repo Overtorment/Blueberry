@@ -157,7 +157,7 @@ describe("blocks-download", () => {
       logs.some(
         (line) =>
           line ===
-          "module start concurrency=2 connectTimeoutMs=3000 syncTimeoutMs=30000",
+          "module start concurrency=2 connectTimeoutMs=60000 syncTimeoutMs=30000",
       ),
     ).toBe(true);
     expect(logs).toContain("block start attempt=1 peer=1.1.1.1:8333");

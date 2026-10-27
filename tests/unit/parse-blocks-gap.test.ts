@@ -190,13 +190,13 @@ describe("parse-blocks gap growth", () => {
 
     db.blocks.insert({
       height: 2,
-      blockHashInternalHex: "cc".repeat(32),
+      blockHashInternalHex: "02".repeat(32),
       block: blockBytesPaying(next.scriptPubKey, 2000n),
     });
     db.parsedBlocks.mark(2);
     db.blocks.insert({
       height: 5,
-      blockHashInternalHex: "dd".repeat(32),
+      blockHashInternalHex: "05".repeat(32),
       block: blockBytesPaying(danger.scriptPubKey, 1000n),
     });
 

@@ -1,9 +1,8 @@
 import { gcm } from "@noble/ciphers/aes";
 import { scrypt } from "@noble/hashes/scrypt";
 import { hex } from "@scure/base";
-
-/** On-disk prefix so boot can tell a blob from a plain secret. */
-export const ENCRYPTED_SECRET_PREFIX = "bbenc1.";
+import { ENCRYPTED_SECRET_PREFIX, isWellFormedEncryptedSecret } from "./encrypted-secret-format.ts";
+export { ENCRYPTED_SECRET_PREFIX, isEncryptedSecret, isWellFormedEncryptedSecret } from "./encrypted-secret-format.ts";
 
 const SCRYPT = {
   N: 1 << 15,
@@ -30,31 +29,6 @@ function randomBytes(length: number): Uint8Array {
 
 function deriveKey(password: string, salt: Uint8Array): Uint8Array {
   return scrypt(normalize(password), salt, SCRYPT);
-}
-
-function isHex(value: string, bytes: number): boolean {
-  return value.length === bytes * 2 && /^[0-9a-f]+$/i.test(value);
-}
-
-/** `bbenc1.<saltHex>:<ivHex>:<tagHex>:<cipherHex>` */
-export function isEncryptedSecret(value: string): boolean {
-  return value.startsWith(ENCRYPTED_SECRET_PREFIX);
-}
-
-export function isWellFormedEncryptedSecret(value: string): boolean {
-  if (!isEncryptedSecret(value)) return false;
-  const parts = value.slice(ENCRYPTED_SECRET_PREFIX.length).split(":");
-  if (parts.length !== 4) return false;
-  const [saltHex, ivHex, tagHex, cipherHex] = parts;
-  if (!saltHex || !ivHex || !tagHex || !cipherHex) return false;
-  if (!isHex(saltHex, SALT_LEN)) return false;
-  if (!isHex(ivHex, IV_LEN)) return false;
-  if (!isHex(tagHex, TAG_LEN)) return false;
-  return (
-    cipherHex.length >= 2 &&
-    cipherHex.length % 2 === 0 &&
-    /^[0-9a-f]+$/i.test(cipherHex)
-  );
 }
 
 /**

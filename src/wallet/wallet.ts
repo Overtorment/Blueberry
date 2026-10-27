@@ -6,8 +6,11 @@ import { log } from "../log.ts";
 import { loadWalletSecret, parseWalletSecret } from "./secret.ts";
 import type { WatchWallet } from "./types.ts";
 import { loadWatchGaps, saveWatchGaps } from "./watch-gaps.ts";
+import { appendBip47Watch, BIP47_ENABLED_KEY } from "./bip47-wallet.ts";
+import { BIP47_CHANNELS_KEY } from "./bip47-channels.ts";
 
 type KvDb = {
+  transaction?(fn: () => void): void;
   keyValue: {
     get(key: string): string | null;
     set(key: string, value: string): void;
@@ -50,7 +53,14 @@ export function createWallet(
   }
 
   let currentGaps = loadWatchGaps(db);
-  let current = deriveWatchWallet(secret, currentGaps);
+  const channelState = () => {
+    const enabled = db.keyValue.get(BIP47_ENABLED_KEY);
+    if (enabled !== "1") return enabled;
+    const raw = db.keyValue.get(BIP47_CHANNELS_KEY);
+    return `${enabled}:${raw === null ? "" : JSON.stringify(JSON.parse(raw).incoming)}`;
+  };
+  let currentChannels = channelState();
+  let current = appendBip47Watch(deriveWatchWallet(secret, currentGaps), db);
   log(
     "wallet",
     `ready kind=${current.kind} external=${currentGaps.external} internal=${currentGaps.internal}`,
@@ -60,10 +70,11 @@ export function createWallet(
     const gaps = loadWatchGaps(db);
     const grew =
       gaps.external !== currentGaps.external ||
-      gaps.internal !== currentGaps.internal;
+      gaps.internal !== currentGaps.internal || channelState() !== currentChannels;
     if (grew) {
       currentGaps = gaps;
-      current = deriveWatchWallet(secret, currentGaps);
+      currentChannels = channelState();
+      current = appendBip47Watch(deriveWatchWallet(secret, currentGaps), db);
       log(
         "wallet",
         `gaps grew external=${gaps.external} internal=${gaps.internal}`,
